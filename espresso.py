@@ -103,9 +103,16 @@ iMax = 1.0
 
 power_when_pulling_shot = 36
 
+# Time in seconds when the pump needs to stay idle before shot after button 4 is pressed, in order to tare the scale.
+
+time_tare = 1.5
+
 #####################################################################
 # Global variables used to share state across functions and threads #
 #####################################################################
+
+last_timer = 0
+last_weight = 0
 
 shot_pouring = False 
 old_shot_pouring = False
@@ -125,6 +132,7 @@ set_temp = shot_temp
 old_set_temp = 0
 power = 0
 pump_power = 0 
+preinf = True
 
 y = deque([sensor.readTempC(), sensor.readTempC(), sensor.readTempC()], 3600) 
 power_series = deque([0,0,0], 3600)
@@ -143,11 +151,11 @@ trigger_refresh_timer = False
 
 # Screen resolution is 320 * 240.
 # Careful here: pygame.Rect uses does not use coordinates for rectangles: (left, top, width, height)
-area_graph = ((0,70),(280,150))
+area_graph = ((0,65),(280,155))
 # This is the reduced-size graph window, used when pulling a shot or entering the settings menu.
 # area_graph = ((0,100),(140,100)) # Note that we need to change npixels_per_tempreading
-area_text_temp = ((0,0),(160,70)) # same here, for the refresh_temp_display function.
-area_timer = ((160,0),(120,80))   # same for the refresh_timer_display
+area_text_temp = ((0,0),(160,60)) # same here, for the refresh_temp_display function.
+area_timer = ((160,0),(120,60))   # same for the refresh_timer_display
 area_icons =((295,0),(25,240))
 area_belowgraph = ((0,220), (280, 20))
 
@@ -243,18 +251,18 @@ def pour_shot():
     # This function will be run in its own thread
     print "pour_shot thread started"
     # Remember to open the 3-way valve here.
-    global pump_power
+    global pump_power, shot_pouring, time_shot_stopped
+    time.sleep(time_tare+.5)
     while shot_pouring == True:
         if seconds_elapsed <= 9:
             pump_power = int(seconds_elapsed) + 1 # increase pump power by 10% each second for the first 10 seconds.
         else:
             pump_power = 10
+        if current_weight > 10.0:
+            end_shot()
         output_pump(pump_power)
     # Make sure that the thread can exit
     if shot_pouring == False:
-        pump_power = 0
-        GPIO.output(pump_pin, 0)
-        # Remember to close the 3-way valve here.
         print "pour_shot thread exited"
         thread.exit()
 
@@ -262,6 +270,7 @@ def counting_seconds():
     # This function will be run in its own thread
     print "counting_seconds thread started"
     global seconds_elapsed, trigger_refresh_timer
+    time.sleep(time_tare+.5)
     start = time.time()
     while shot_pouring == True:
         seconds_elapsed = math.floor((time.time() - start)*10)/10
@@ -357,9 +366,20 @@ def draw_power(power_data):
         pygame.draw.line(lcd, col_orange, (graph_left+npixels_per_tempreading*j, 220), (graph_left+npixels_per_tempreading*j, int(220-power_data[j]/4)),1)
         
 def draw_belowgraph():
+    global switch_below_graph
     string = "T: " + str(set_temp) + u"\u2103" + "  -  H: " + str(int(power)) + "%"
     if steaming_on == True:
         string = string + "  -  Steam"
+    if steaming_on == False:
+        if switch_below_graph == 0:
+            if preinf == True:
+                string = string + "  -  Preinfusion"
+            else:
+                string = string + " - No preinfusion"
+        elif switch_below_graph == 1:
+            if stop_mode == "Weight":
+                string = string + " - Stop: %s"
+        switch_below_graph = (switch_below_graph + 1) % 3
     display_text(string, area_belowgraph[0], 25, col_text)
 
 def refresh_timer_display(seconds_elapsed, area_timer):
@@ -371,6 +391,7 @@ def refresh_timer_display(seconds_elapsed, area_timer):
 
 def refresh_temp_display(y, graph_top, graph_bottom, area_graph, area_text_temp):
     # Erase the areas to be updated
+    lcd.fill(col_background, rect = area_timer)
     lcd.fill(col_background, rect = area_graph)
     lcd.fill(col_background, rect = area_text_temp)
     lcd.fill(col_background, rect = area_belowgraph)
@@ -394,6 +415,10 @@ def refresh_temp_display(y, graph_top, graph_bottom, area_graph, area_text_temp)
             display_text('{0:.2f}'.format(subset_y[-1]) + u"\u2103", (5, 5), 60, col_text) # u"\u2103" is the unicode degrees celsisus sign.
         pygame.display.update(area_text_temp)
         pygame.display.update(area_belowgraph)
+        if (last_weight != 0) & (last_timer != 0):
+            display_text("Last shot", (180, 8), 25, col_text)
+            display_text("%0.0f s. / %0.0f g." %(last_timer, last_weight), (180, 26), 25, col_text)
+        pygame.display.update(area_timer)
     pygame.display.update(area_graph)
 
 icon_start = pygame.image.load(os.path.join('icons', 'start.png'))
@@ -444,13 +469,13 @@ def reset_graph_area(menu, shot_pouring):
         print "Big graph area"
         lcd.fill(col_background, rect = area_graph)
         pygame.display.update(area_graph)
-        area_graph = ((0,70),(280,150))
+        area_graph = ((0,65),(280,155))
         npixels_per_tempreading = 2
     elif (menu == 1)|(shot_pouring == True):
         print "Small graph area"
         lcd.fill(col_background, rect = area_graph)
         pygame.display.update(area_graph)
-        area_graph = ((0,70),(140,150))
+        area_graph = ((0,65),(140,155))
         npixels_per_tempreading = 1
     graph_top = area_graph[0][1]
     graph_bottom = area_graph[0][1] + area_graph[1][1] 
@@ -462,14 +487,14 @@ def display_pump_power():
     while trigger_stop_scale == False:
         if (pump_power != old_pump_power) & (pump_power >= 0):
             print "display pump power update"
-            lcd.fill(col_background, rect = (200, 65, 70, 160))
+            lcd.fill(col_background, rect = (200, 65, 70, 155))
             display_text("Pump", (200, 180), 25, col_text)
             display_text(str(pump_power*10) + "%", (202 if pump_power == 10 else 206, 200), 25, col_text)
             for box in range(1, 11):
                 lcd.fill(col_verydarkgrey, rect= ((215, 170-(box-1)*10), (20, 8)))
             for box in range(1, pump_power + 1):
                 lcd.fill(col_lightblue, rect= ((215, 170-(box-1)*10), (20, 8)))
-            pygame.display.update((200, 65, 70, 160))
+            pygame.display.update((200, 65, 70, 155))
             old_pump_power = pump_power
         time.sleep(.01)
     if trigger_stop_scale == True:
@@ -507,6 +532,12 @@ def convert_volts():
 
 def tare():
     global tare_weight, prev_weight
+    lcd.fill(col_background, rect = area_text_temp)
+    text = "Taring"
+    for i in range(1, 4):
+        display_text("Taring" + "."*i, (175, 20), 30, col_text)
+        pygame.display.update(area_timer)
+        time.sleep(time_tare/3)
     tare_weight += current_weight
     prev_weight = [0.0]*4
     print "Tare"
@@ -567,32 +598,51 @@ def voltages_to_weight():
 #
 # e.g. in one state: button4 will start a shot, or stop a shot, or start steaming, or select.
 
-def display_menu_items(items, n_item_selected):
-    global n
-    n = len(items)
+def display_menu_items(items, n_item_selected, n):
     max_height = 240 - 60 - 25
     text_height = 25 * n
     margin_height = (max_height - text_height)/2
-    lcd.fill(col_background, ((150, 60), (130, 165)))
+    lcd.fill(col_background, ((150, 65), (130, 155)))
     for i in range(0, n):
         display_text(items[i], (170, 60 + margin_height + 25*i), 25, col_white)
     display_text(">", (160, 60 + margin_height - 2 + 25*(n_item_selected % n)), 25, col_white)
-    pygame.display.update(((150, 60), (130, 165)))
+    pygame.display.update(((150, 65), (130, 155)))
 
 def display_main_menu():
-    global items
-    items = ["Steam", "Shutdown", "Shot mode", "Temperature", "Flow"]
-    display_menu_items(items, n_item_selected)
+    global items, n
+    items = ["Steam", "Shut Down", "Shot mode", "Temperature", "Flow", "Backflush"]
+    n = len(items)
+    display_menu_items(items, n_item_selected, n)
+
+def display_confirm_shutdown_menu():
+    global items, m
+    items = ["Shut Down", "Cancel"]
+    m = len(items)
+    display_menu_items(items, m_item_selected, m)
+
+def end_shot():
+    global time_shot_stopped, shot_pouring
+    shot_pouring = False
+    pump_power = 0
+    GPIO.output(pump_pin, 0)
+    # Remember to close the 3-way valve here.
+    time_shot_stopped = time.time()
+    thread.start_new_thread(wait_after_shot_and_refresh, ())
 
 def wait_after_shot_and_refresh():
     while time.time() - time_shot_stopped < 5:
-        time.sleep(.5)
+        time.sleep(.1)
     if time.time() - time_shot_stopped >= 5:
-        global trigger_refresh_temp_display, trigger_stop_scale
+        global trigger_refresh_temp_display, trigger_stop_scale, last_weight, last_timer
         reset_graph_area(menu, shot_pouring)
+        lcd.fill(col_background, area_timer)
+        pygame.display.update(area_timer)
         refresh_temp_display(y, graph_top, graph_bottom, area_graph, area_text_temp)
         trigger_refresh_temp_display = True
         trigger_stop_scale = True
+        last_weight = current_weight
+        last_timer = seconds_elapsed
+        thread.exit()
     
 def button1(channel):
     global menu, n_item_selected
@@ -627,7 +677,6 @@ def button3(channel):
         global n_item_selected
         n_item_selected += 1
         display_main_menu()
-    
 
 def button4(channel):
     # print "Button 4 pressed"
@@ -635,10 +684,7 @@ def button4(channel):
         global shot_pouring, pump_power, time_shot_stopped, trigger_stop_scale
         if shot_pouring == True:
             # Need to start a timer time_since_shot_ended here. Display ended time for 10 seconds; keep measuring weight for another 10 seconds; stay in shot display mode for 10 seconds.
-            shot_pouring = False
-            pump_power = 0
-            time_shot_stopped = time.time()
-            thread.start_new_thread(wait_after_shot_and_refresh, ())
+            end_shot()
         elif shot_pouring == False :
             # here: tare the scale and thread.start_new_thread(update_scale, ())
             # here: preheat for 1-2 seconds if needed
@@ -649,8 +695,7 @@ def button4(channel):
             trigger_stop_scale = False
             thread.start_new_thread(read_voltage, ())
             thread.start_new_thread(voltages_to_weight, ())
-            time.sleep(.1)
-            tare()
+            thread.start_new_thread(tare, ())
             thread.start_new_thread(counting_seconds, ())
             thread.start_new_thread(pour_shot, ())
             thread.start_new_thread(display_pump_power, ())
@@ -658,15 +703,27 @@ def button4(channel):
             # but I don't know how to exit a thread remotely, from an outside function. thread.exit only works from the inside of the thread.
             # Make sure that each function called by thread.start_new_thread() has an if condition to trigger thread.exit() when its job is done.
     elif menu == 1: # Settings menu
-        global steaming_on, set_temp
-        if (n_item_selected % n == 0) & (steaming_on == False):
-            set_temp = steam_temp
-            steaming_on = True
-        elif (n_item_selected % n == 0) & (steaming_on == True):
-            set_temp = shot_temp
-            steaming_on = False
-        elif selected_choice != "Steam":
-            print "Select selected_choice"
+        global steaming_on, set_temp, n_item_selected, m_item_selected
+        if n_item_selected % n == 0: 
+            if (steaming_on == False):
+                set_temp = steam_temp
+                steaming_on = True
+            elif steaming_on == True:
+                set_temp = shot_temp
+                steaming_on = False
+        elif n_item_selected % n == 1:
+            # This is the "Shut Down" choice.
+            m_item_selected = 0
+            # Asking for confirmation
+            display_confirm_shutdown_menu()
+            # At this point, keep track of the number of presses of button 4, if it increases since the shutdown menu was displayed, then shut down or cancel shut down.
+            if m_item_selected % m == 0: 
+                GPIO.cleanup()
+                quit()
+            elif m_item_selected % m == 0:
+                n_item_selected = 0
+                display_main_menu()
+
 
 GPIO.add_event_detect(button1_pin, GPIO.BOTH, callback=button1, bouncetime = 500)
 GPIO.add_event_detect(button2_pin, GPIO.BOTH, callback=button2, bouncetime = 500)
