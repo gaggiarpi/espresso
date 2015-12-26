@@ -119,13 +119,15 @@ old_shot_pouring = False
 seconds_elapsed = 0.0
 
 time_shot_stopped = time.time()-10
-menu = 0 # Other options: 0 = main menu; 1 = settings menu
-old_menu = ""
 trigger_stop_scale = True
-selected_choice = ""
-old_selected_choice = ""
+
+menu = 0 # Other options: 0 = main menu; 1 = settings menu
+old_menu = 1
 steaming_on = False
 old_steaming_on = False
+backflush_on = False
+old_backflush_on = False
+
 shot_temp = 90
 steam_temp = 120
 set_temp = shot_temp
@@ -133,6 +135,9 @@ old_set_temp = 0
 power = 0
 pump_power = 0 
 preinf = True
+
+submenu = 0
+m_item_selected = 0
 
 y = deque([sensor.readTempC(), sensor.readTempC(), sensor.readTempC()], 3600) 
 power_series = deque([0,0,0], 3600)
@@ -174,9 +179,9 @@ npixels_per_tempreading = 2
 def read_temp():
     global y, trigger_refresh_temp_display, trigger_adjust_heating
     current_temp_reading = sensor.readTempC()
-    if current_temp_reading < y[-1] - 5: # A drop of more than 5 degrees between readings is clearly an error.
-        print "Implausible reading (" + str(current_temp_reading) + ") replaced by previous value of (" + str(y[-1])+")"
-        current_temp_reading = y[-1]
+    # if current_temp_reading < y[-1] - 5: # A drop of more than 5 degrees between readings is clearly an error.
+    #     print "Implausible reading (" + str(current_temp_reading) + ") replaced by previous value of (" + str(y[-1])+")"
+    #     current_temp_reading = y[-1]
     y.append(current_temp_reading)
     trigger_refresh_temp_display = True
     trigger_adjust_heating = True
@@ -258,7 +263,7 @@ def pour_shot():
             pump_power = int(seconds_elapsed) + 1 # increase pump power by 10% each second for the first 10 seconds.
         else:
             pump_power = 10
-        if current_weight > 10.0:
+        if current_weight > 34.0:
             end_shot()
         output_pump(pump_power)
     # Make sure that the thread can exit
@@ -408,12 +413,13 @@ def refresh_temp_display(y, graph_top, graph_bottom, area_graph, area_text_temp)
         elif subset_y[-1] < 100:
             display_text('{0:.2f}'.format(subset_y[-1]) + u"\u2103", (5, 5), 60, col_text) # u"\u2103" is the unicode degrees celsisus sign.
         pygame.display.update(area_text_temp)
-        pygame.display.update(area_belowgraph)
         if (last_weight != 0) & (last_timer != 0):
             display_text("Last shot", (180, 8), 25, col_text)
             display_text("%0.0f s. / %0.0f g." %(last_timer, last_weight), (180, 26), 25, col_text)
         pygame.display.update(area_timer)
     pygame.display.update(area_graph)
+    pygame.display.update(area_belowgraph)
+    
 
 icon_start = pygame.image.load(os.path.join('icons', 'start.png'))
 icon_plus = pygame.image.load(os.path.join('icons', 'plus.png'))
@@ -426,7 +432,7 @@ icon_check = pygame.image.load(os.path.join('icons', 'check.png'))
 icon_back = pygame.image.load(os.path.join('icons', 'back.png'))
 icon_stop = pygame.image.load(os.path.join('icons', 'stop.png'))
 
-def draw_buttons(menu, shot_pouring, steaming_on):
+def draw_buttons(menu, shot_pouring, steaming_on, backflush_on):
     # Buttons will look different depending on menu and whether steam_mode is selected, or steaming is started.
     if menu == 0:
         if shot_pouring == True:
@@ -437,7 +443,7 @@ def draw_buttons(menu, shot_pouring, steaming_on):
             lcd.blit(icon_down, (295, 156))
             lcd.blit(icon_start, (295, 216))
     elif menu == 1:
-        if steaming_on == True:
+        if (steaming_on == True) | (backflush_on == True):
             lcd.blit(icon_stop, (295, 216))
         else:
             lcd.blit(icon_back, (295, 36))
@@ -445,17 +451,18 @@ def draw_buttons(menu, shot_pouring, steaming_on):
             lcd.blit(icon_down, (295, 156))
             lcd.blit(icon_check, (295, 216))
 
-def refresh_buttons(menu, shot_pouring, steaming_on):
+def refresh_buttons(menu, shot_pouring, steaming_on, backflush_on):
     # Same as time: only refresh if something changes.
-    global old_menu, old_set_temp, old_shot_pouring, old_steaming_on
-    if (menu != old_menu) | (shot_pouring != old_shot_pouring) | (steaming_on != old_steaming_on):
+    global old_menu, old_set_temp, old_shot_pouring, old_steaming_on, old_backflush_on
+    if (menu != old_menu) | (shot_pouring != old_shot_pouring) | (steaming_on != old_steaming_on) | (backflush_on != old_backflush_on):
         print "Refreshing button icons"
         lcd.fill(col_background, rect = area_icons)
-        draw_buttons(menu, shot_pouring, steaming_on)
+        draw_buttons(menu, shot_pouring, steaming_on, backflush_on)
         pygame.display.update(area_icons)
         old_menu = menu
         old_shot_pouring = shot_pouring
         old_steaming_on = steaming_on
+        old_backflush_on = backflush_on
 
 def reset_graph_area(menu, shot_pouring):
     global area_graph, graph_top, graph_bottom, graph_left, graph_right, npixels_per_tempreading
@@ -495,6 +502,20 @@ def display_pump_power():
         print "Exiting display pump power thread"
         thread.exit()
         
+def backflush():
+    global backflush_on
+    backflush_on = True
+    while backflush_on == True:
+        # Display info
+        for i in range(0, 5):
+            GPIO.output(pump_pin, 1)
+            time.sleep(5)
+            GPIO.output(pump_pin, 0)
+            time.sleep(5)
+    backflush_on = False
+    print "Exiting backflush thread"
+    thread.exit()
+
 def volts():
     global voltsdiff
     voltsdiff.append(-adc.readADCDifferential01(adc_resolution, sps)/1000.0)
@@ -592,24 +613,24 @@ def voltages_to_weight():
 #
 # e.g. in one state: button4 will start a shot, or stop a shot, or start steaming, or select.
 
-def display_menu_items(items, n_item_selected, n):
+def display_menu_items(items, n_item_selected, number_of_choices):
     max_height = 240 - 60 - 25
-    text_height = 25 * n
+    text_height = 25 * number_of_choices
     margin_height = (max_height - text_height)/2
     lcd.fill(col_background, ((150, 65), (130, 155)))
-    for i in range(0, n):
+    for i in range(0, number_of_choices):
         display_text(items[i], (170, 60 + margin_height + 25*i), 25, col_white)
-    display_text(">", (160, 60 + margin_height - 2 + 25*(n_item_selected % n)), 25, col_white)
+    display_text(">", (160, 60 + margin_height - 2 + 25*(n_item_selected % number_of_choices)), 25, col_white)
     pygame.display.update(((150, 65), (130, 155)))
 
 def display_main_menu():
-    global items, n, n_items_selected
+    global items, n_items_selected, n
     items = ["Steam", "Shut Down", "Shot mode", "Temperature", "Flow", "Backflush"]
     n = len(items)
     display_menu_items(items, n_item_selected, n)
 
 def display_confirm_shutdown_menu():
-    global items, m, m_items_selected
+    global items, m_item_selected, m
     items = ["Shut Down", "Cancel"]
     m = len(items)
     display_menu_items(items, m_item_selected, m)
@@ -637,14 +658,15 @@ def wait_after_shot_and_refresh():
         last_weight = current_weight
         last_timer = seconds_elapsed
         thread.exit()
-
-submenu = 0
     
 def button1(channel):
+    print "Button 1 pressed"
     global menu, n_item_selected, submenu
-    submenu = 0
-    # print "Button 1 pressed"
-    menu = 1-menu
+    if submenu == 0:
+        menu = 1-menu
+    elif submenu == 1:
+        menu = 1
+        submenu = 0
     reset_graph_area(menu, shot_pouring)
     refresh_temp_display(y, graph_top, graph_bottom, area_graph, area_text_temp)
     if menu == 1:
@@ -683,17 +705,19 @@ def button3(channel):
             m_item_selected += 1
             display_confirm_shutdown_menu()
 
-
 def button4(channel):
     # print "Button 4 pressed"
-    global button4_repress
+    global shot_pouring, pump_power, time_shot_stopped, trigger_stop_scale, steaming_on, set_temp, button4_repress, m_item_selected, n_item_selected, menu, submenu, backflush_on
+    
+    # Check if button 4 is called from within a submenu
+    # This will change the behavior of button4: first button4 press: submenu is displayed; second button4 press: choice is selected.
     if submenu == 1:
         button4_repress = True
     elif submenu == 0:
         button4_repress = False
+        m_item_selected = 0
     
     if menu == 0: # Main menu
-        global shot_pouring, pump_power, time_shot_stopped, trigger_stop_scale
         if shot_pouring == True:
             # Need to start a timer time_since_shot_ended here. Display ended time for 10 seconds; keep measuring weight for another 10 seconds; stay in shot display mode for 10 seconds.
             end_shot()
@@ -715,34 +739,38 @@ def button4(channel):
             # but I don't know how to exit a thread remotely, from an outside function. thread.exit only works from the inside of the thread.
             # Make sure that each function called by thread.start_new_thread() has an if condition to trigger thread.exit() when its job is done.
     elif menu == 1: # Settings menu
-        global steaming_on, set_temp, n_item_selected, m_item_selected, submenu
         if n_item_selected % n == 0: 
+            # Steam
             if (steaming_on == False):
                 set_temp = steam_temp
                 steaming_on = True
             elif steaming_on == True:
                 set_temp = shot_temp
                 steaming_on = False
-        elif n_item_selected % n == 1:
+        elif n_item_selected % n == 1: 
             # This is the "Shut Down" choice.
             submenu = 1
-            m_item_selected = 0
             # Asking for confirmation
             display_confirm_shutdown_menu()
-            # At this point, keep track of the number of presses of button 4, if it increases since the shutdown menu was displayed, then shut down or cancel shut down.
             if (button4_repress == True) & (m_item_selected % m == 0): 
-                print "quit"
-                # GPIO.cleanup()
-                # quit()
+                # Save data in json file (y, power_series,)
+                # Save settings (temperature, preinfusion, etc.) in another json file to be loaded later on.
+                GPIO.cleanup()
+                pygame.quit()
+                os.system("sudo shutdown now")
             elif (button4_repress == True) & (m_item_selected % m == 1):
                 submenu = 0
-                n_item_selected = 0
                 m_item_selected = 0
-                button4_repress == False
+                button4_repress = False
                 display_main_menu()
-                
-
-
+        elif n_item_selected % n == 5: 
+            # Backflush
+            if backflush_on == False:
+                thread.start_new_thread(backflush, ())
+            elif backflush_on == True:
+                backflush_on = False
+    
+        
 GPIO.add_event_detect(button1_pin, GPIO.BOTH, callback=button1, bouncetime = 500)
 GPIO.add_event_detect(button2_pin, GPIO.BOTH, callback=button2, bouncetime = 500)
 GPIO.add_event_detect(button3_pin, GPIO.BOTH, callback=button3, bouncetime = 500)
@@ -771,7 +799,7 @@ def thread_refresh_temp_display():
 
 def thread_refresh_buttons():
     while True:
-        refresh_buttons(menu, shot_pouring, steaming_on)
+        refresh_buttons(menu, shot_pouring, steaming_on, backflush_on)
         time.sleep(.01)
 
 def thread_refresh_timer_display():
