@@ -366,20 +366,14 @@ def draw_power(power_data):
         pygame.draw.line(lcd, col_orange, (graph_left+npixels_per_tempreading*j, 220), (graph_left+npixels_per_tempreading*j, int(220-power_data[j]/4)),1)
         
 def draw_belowgraph():
-    global switch_below_graph
     string = "T: " + str(set_temp) + u"\u2103" + "  -  H: " + str(int(power)) + "%"
     if steaming_on == True:
         string = string + "  -  Steam"
     if steaming_on == False:
-        if switch_below_graph == 0:
-            if preinf == True:
-                string = string + "  -  Preinfusion"
-            else:
-                string = string + " - No preinfusion"
-        elif switch_below_graph == 1:
-            if stop_mode == "Weight":
-                string = string + " - Stop: %s"
-        switch_below_graph = (switch_below_graph + 1) % 3
+        if preinf == True:
+            string = string + "  -  Preinfusion"
+        else:
+            string = string + " - No preinfusion"
     display_text(string, area_belowgraph[0], 25, col_text)
 
 def refresh_timer_display(seconds_elapsed, area_timer):
@@ -531,7 +525,7 @@ def convert_volts():
     prev_weight = [current_weight, prev_weight[0], prev_weight[1], prev_weight[2]]
 
 def tare():
-    global tare_weight, prev_weight
+    global tare_weight, prev_weight, voltsdiff
     lcd.fill(col_background, rect = area_text_temp)
     text = "Taring"
     for i in range(1, 4):
@@ -609,13 +603,13 @@ def display_menu_items(items, n_item_selected, n):
     pygame.display.update(((150, 65), (130, 155)))
 
 def display_main_menu():
-    global items, n
+    global items, n, n_items_selected
     items = ["Steam", "Shut Down", "Shot mode", "Temperature", "Flow", "Backflush"]
     n = len(items)
     display_menu_items(items, n_item_selected, n)
 
 def display_confirm_shutdown_menu():
-    global items, m
+    global items, m, m_items_selected
     items = ["Shut Down", "Cancel"]
     m = len(items)
     display_menu_items(items, m_item_selected, m)
@@ -643,9 +637,12 @@ def wait_after_shot_and_refresh():
         last_weight = current_weight
         last_timer = seconds_elapsed
         thread.exit()
+
+submenu = 0
     
 def button1(channel):
-    global menu, n_item_selected
+    global menu, n_item_selected, submenu
+    submenu = 0
     # print "Button 1 pressed"
     menu = 1-menu
     reset_graph_area(menu, shot_pouring)
@@ -662,9 +659,13 @@ def button2(channel):
         shot_temp = set_temp
         refresh_temp_display(y, graph_top, graph_bottom, area_graph, area_text_temp)
     if menu == 1:
-        global n_item_selected
-        n_item_selected -= 1
-        display_main_menu()
+        global n_item_selected, m_item_selected
+        if submenu == 0:
+            n_item_selected -= 1
+            display_main_menu()
+        elif submenu == 1:
+            m_item_selected -= 1
+            display_confirm_shutdown_menu()
 
 def button3(channel):
     print "Button 3 pressed"
@@ -674,12 +675,23 @@ def button3(channel):
         shot_temp = set_temp
         refresh_temp_display(y, graph_top, graph_bottom, area_graph, area_text_temp)
     if menu == 1:
-        global n_item_selected
-        n_item_selected += 1
-        display_main_menu()
+        global n_item_selected, m_item_selected
+        if submenu == 0:
+            n_item_selected += 1
+            display_main_menu()
+        elif submenu == 1:
+            m_item_selected += 1
+            display_confirm_shutdown_menu()
+
 
 def button4(channel):
     # print "Button 4 pressed"
+    global button4_repress
+    if submenu == 1:
+        button4_repress = True
+    elif submenu == 0:
+        button4_repress = False
+    
     if menu == 0: # Main menu
         global shot_pouring, pump_power, time_shot_stopped, trigger_stop_scale
         if shot_pouring == True:
@@ -703,7 +715,7 @@ def button4(channel):
             # but I don't know how to exit a thread remotely, from an outside function. thread.exit only works from the inside of the thread.
             # Make sure that each function called by thread.start_new_thread() has an if condition to trigger thread.exit() when its job is done.
     elif menu == 1: # Settings menu
-        global steaming_on, set_temp, n_item_selected, m_item_selected
+        global steaming_on, set_temp, n_item_selected, m_item_selected, submenu
         if n_item_selected % n == 0: 
             if (steaming_on == False):
                 set_temp = steam_temp
@@ -713,16 +725,22 @@ def button4(channel):
                 steaming_on = False
         elif n_item_selected % n == 1:
             # This is the "Shut Down" choice.
+            submenu = 1
             m_item_selected = 0
             # Asking for confirmation
             display_confirm_shutdown_menu()
             # At this point, keep track of the number of presses of button 4, if it increases since the shutdown menu was displayed, then shut down or cancel shut down.
-            if m_item_selected % m == 0: 
-                GPIO.cleanup()
-                quit()
-            elif m_item_selected % m == 0:
+            if (button4_repress == True) & (m_item_selected % m == 0): 
+                print "quit"
+                # GPIO.cleanup()
+                # quit()
+            elif (button4_repress == True) & (m_item_selected % m == 1):
+                submenu = 0
                 n_item_selected = 0
+                m_item_selected = 0
+                button4_repress == False
                 display_main_menu()
+                
 
 
 GPIO.add_event_detect(button1_pin, GPIO.BOTH, callback=button1, bouncetime = 500)
