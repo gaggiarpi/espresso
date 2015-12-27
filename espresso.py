@@ -67,7 +67,7 @@ adc = ADS1x15(ic=ADS1115)
 sps = 16 # sps can be 8, 16, 32, 64, 128, 250, 475, 860
 sensitivity_factor = 2 # The sensitivity factor determines the length of the voltsdiff list, on which the moving average is computed: the longer the list, the less sensitive the measurement. A sensitivity factor of 4 means that the moving average is run on the voltages measured in the last one fourth of a second.
 adc_resolution = 2048
-scaling = [-279.0, 445.3]
+scaling = [-287.35410, 430.74201]
 
 print "Scale resolution = %0.4f grams" %(round(adc_resolution,0)/(2**15)*scaling[1]/1000.0)
 
@@ -163,6 +163,7 @@ area_text_temp = ((0,0),(160,60)) # same here, for the refresh_temp_display func
 area_timer = ((160,0),(120,60))   # same for the refresh_timer_display
 area_icons =((295,0),(25,240))
 area_belowgraph = ((0,220), (280, 20))
+area_menu = ((150, 65), (130, 155))
 
 min_range = 5
 graph_top = area_graph[0][1]
@@ -268,6 +269,7 @@ def pour_shot():
         output_pump(pump_power)
     # Make sure that the thread can exit
     if shot_pouring == False:
+        GPIO.output(pump_pin, 0)
         print "pour_shot thread exited"
         thread.exit()
 
@@ -501,18 +503,26 @@ def display_pump_power():
     if trigger_stop_scale == True:
         print "Exiting display pump power thread"
         thread.exit()
-        
+
+area_menu = ((150, 65), (130, 155))
+
 def backflush():
     global backflush_on
     backflush_on = True
-    while backflush_on == True:
+    i = 1
+    while (backflush_on == True) & (i <= 5):
+        lcd.fill(col_background, area_menu)
+        display_text("Backflush...", (160, 100), 25, col_white)
+        display_text("%s/5" % i, (160, 125), 25, col_white)
+        pygame.display.update(area_menu)
         # Display info
-        for i in range(0, 5):
-            GPIO.output(pump_pin, 1)
-            time.sleep(5)
-            GPIO.output(pump_pin, 0)
-            time.sleep(5)
+        GPIO.output(pump_pin, 1)
+        time.sleep(5)
+        GPIO.output(pump_pin, 0)
+        time.sleep(5)
+        i = i+1
     backflush_on = False
+    display_main_menu()
     print "Exiting backflush thread"
     thread.exit()
 
@@ -533,15 +543,14 @@ def convert_volts():
     global current_weight, prev_weight, mva_voltsdiff, tare_weight
     mva_voltsdiff = mean(voltsdiff)
     current_weight = scaling[0] + mva_voltsdiff*scaling[1] - tare_weight
-    if abs(current_weight) <= 0.3:
+    if abs(current_weight) <= 0.1:
         prev_tare_weight = tare_weight
         tare_weight += current_weight
         current_weight = current_weight + prev_tare_weight - tare_weight
     if (abs(round(current_weight,1)) < 0.1) & (current_weight < 0):
         current_weight = -current_weight # This is just to get rid of these annoying "-0.0" weight measurements.
     if ((abs(current_weight - prev_weight[0])<.1) |
-       ((abs(current_weight - prev_weight[0])<.2) & (prev_weight[0] == prev_weight[1])) |
-       ((abs(current_weight - prev_weight[0])<.3) & (prev_weight[0] == prev_weight[2]))):
+       ((abs(current_weight - prev_weight[0])<.2) & (prev_weight[0] == prev_weight[1]))):
         current_weight = prev_weight[0]
     prev_weight = [current_weight, prev_weight[0], prev_weight[1], prev_weight[2]]
 
@@ -617,11 +626,11 @@ def display_menu_items(items, n_item_selected, number_of_choices):
     max_height = 240 - 60 - 25
     text_height = 25 * number_of_choices
     margin_height = (max_height - text_height)/2
-    lcd.fill(col_background, ((150, 65), (130, 155)))
+    lcd.fill(col_background, area_menu)
     for i in range(0, number_of_choices):
         display_text(items[i], (170, 60 + margin_height + 25*i), 25, col_white)
     display_text(">", (160, 60 + margin_height - 2 + 25*(n_item_selected % number_of_choices)), 25, col_white)
-    pygame.display.update(((150, 65), (130, 155)))
+    pygame.display.update(area_menu)
 
 def display_main_menu():
     global items, n_items_selected, n
