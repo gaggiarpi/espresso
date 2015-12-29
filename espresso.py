@@ -6,8 +6,10 @@ import random
 import time
 import math
 import os
+import glob
+import subprocess
 import Adafruit_GPIO.SPI as SPI
-import Adafruit_MAX31855.MAX31855 as MAX31855
+# import Adafruit_MAX31855.MAX31855 as MAX31855
 import RPi.GPIO as GPIO
 import thread
 import signal
@@ -35,11 +37,44 @@ heat_pin = 16
 
 # Reading temperature from thermocouple, using software SPI connection
 
-DO  = 26
-CS  = 19
-CLK = 13
+# DO  = 26
+# CS  = 19
+# CLK = 13
+#
+# sensor = MAX31855.MAX31855(CLK, CS, DO)
 
-sensor = MAX31855.MAX31855(CLK, CS, DO)
+os.system('modprobe w1-gpio')
+os.system('modprobe w1-therm')
+ 
+base_dir = '/sys/bus/w1/devices/'
+device_folder = glob.glob(base_dir + '28*')[0]
+device_file = device_folder + '/w1_slave'
+ 
+# def read_sensor_raw():
+#     f = open(device_file, 'r')
+#     lines = f.readlines()
+#     f.close()
+#     return lines
+ 
+def read_sensor():
+    lines = read_sensor_raw()
+    while lines[0].strip()[-3:] != 'YES':
+        # time.sleep(0.2)
+        lines = read_sensor_raw()
+    equals_pos = lines[1].find('t=')
+    if equals_pos != -1:
+        temp_string = lines[1][equals_pos+2:]
+        temp_c = float(temp_string) / 1000.0
+        return temp_c
+        
+def read_sensor_raw():
+    catdata = subprocess.Popen(['cat',device_file], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out,err = catdata.communicate()
+    out_decode = out.decode('utf-8')
+    lines = out_decode.split('\n')
+    return lines
+
+
 
 # Setting up input pins for buttons:
 
@@ -139,7 +174,8 @@ preinf = True
 submenu = 0
 m_item_selected = 0
 
-y = deque([sensor.readTempC(), sensor.readTempC(), sensor.readTempC()], 3600) 
+temp0 = read_sensor()
+y = deque([temp0, temp0, temp0], 3600) 
 power_series = deque([0,0,0], 3600)
 shot_series = deque([False, False, False], 3600)
 
@@ -179,7 +215,7 @@ npixels_per_tempreading = 2
 
 def read_temp():
     global y, trigger_refresh_temp_display, trigger_adjust_heating
-    current_temp_reading = sensor.readTempC()
+    current_temp_reading = read_sensor()
     # if current_temp_reading < y[-1] - 5: # A drop of more than 5 degrees between readings is clearly an error.
     #     print "Implausible reading (" + str(current_temp_reading) + ") replaced by previous value of (" + str(y[-1])+")"
     #     current_temp_reading = y[-1]
@@ -238,10 +274,10 @@ def adjust_heating_power():
 def output_heat():
     if power > 0:
         GPIO.output(heat_pin, True)
-        time.sleep(.5 * power/100)
+        time.sleep(.85 * power/100)
     if power < 100:
         GPIO.output(heat_pin, False)
-        time.sleep(.5 * (100-power)/100)
+        time.sleep(.85 * (100-power)/100)
     GPIO.output(heat_pin, False)
 
 def output_pump(pump_power):
@@ -792,8 +828,10 @@ GPIO.add_event_detect(button4_pin, GPIO.BOTH, callback=button4, bouncetime = 500
 
 def thread_read_temp():
     while True:
+#        t = time.time()
         read_temp()
         adjust_heating_power()
+#        print time.time() - t
         output_heat()
 
 # Check out the if condition inside the while loops. "trigger_" variables force the update/refresh.
@@ -908,3 +946,13 @@ except KeyboardInterrupt:
 # Adjust heat during shot (set values)
 # Steaming
 # Menus and buttons. Get icons here: https://www.google.com/design/icons/
+
+
+
+# Need to sync read_temp and adjust_heat:
+#
+# read_temp() data should have a timestamp.
+#
+# if time.time() - timestamp > .39:
+#     print "read_temp and adjust_heat are getting out of sync"
+#     GPIO heat False for the next .39
