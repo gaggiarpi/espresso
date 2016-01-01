@@ -1,0 +1,58 @@
+Breadboard connections:
+=======================
+
+Heat/pump SSR output (3 wires, left hand side of the machine)
+
+Red: 	row 17 (right)	=	Heat SSR - DC
+Green: 	row 18 (right)	=	Heat SSR + DC
+Yellow: row 16 (right)	=	Pump SSR + DC
+
+Note: make sure Heat SSR - DC and Pump SSR - DC are connected with a wire (white)
+
+------------------------------------------
+
+DS18B20 temperature sensor input (3 wires, left-hand side of the machine)
+
+Black:	23 (left) to GND
+White:	24 (left) to GPIO pin 4 (1-wire interface data)
+Grey:	25 (left) to 3V3
+
+Note: 10K resistor between (24) and (25)
+
+------------------------------------------
+
+10K pot: (3 flat wires, right hand side of the machine)
+
+Yellow: ADC input 02 
+Green: +3V3
+Red: -3V3
+
+------------------------------------------
+
+Scale: (4 wires, right-hand side of the machine)
+
+Brown: -
+Red: +5V
+Orange: ADC input 00
+Yellow: ADC input 01
+
+------------------------------------------
+
+SSR connections
+===============
+
+Heat SSR
+
+DC: - white AND red
+    + green
+
+AC: grey / red
+
+------------------------------------------
+
+Pump SSR
+
+DC: - white
+    + yellow
+
+AC: blue/blue
