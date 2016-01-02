@@ -139,7 +139,7 @@ iMax = 1.0
 
 # Open-loop temperature control
 
-power_when_pulling_shot = 20
+power_when_pulling_shot = 30
 
 # Time in seconds when the pump needs to stay idle before shot after button 4 is pressed, in order to tare the scale.
 
@@ -169,20 +169,30 @@ flush_on = False
 old_flush_on = False
 
 shot_temp = 90
-steam_temp = 120
+steam_temp = 90
 set_temp = shot_temp
 old_set_temp = 0
 power = 0
 pump_power = 0 
 preinf = True
+max_weight = 32.0
 
 submenu = 0
 m_item_selected = 0
 
+# These values will be logged and saved in a json file
+# y, heat_series, shot_series are directly used for display
+
 temp0 = read_sensor()
 y = deque([temp0, temp0, temp0], 3600) 
-power_series = deque([0,0,0], 3600)
+heat_series = deque([0,0,0], 3600)
 shot_series = deque([False, False, False], 3600)
+pump_series = deque([0,0,0], 3600)
+weight_series = []
+
+y_time = deque([0,0,0], 3600)
+weight_series_time = []
+
 
 # With a refresh speed of 0.5 seconds, 3600 data points = 30 minutes of temperature logging. Perhaps overkill.
 # Making sure that y starts with a length of 3, so that the PID function can be run right after read_temp.
@@ -222,13 +232,11 @@ def read_temp():
     # global y
     # global y, trigger_refresh_temp_display, trigger_adjust_heating
     current_temp_reading = read_sensor()
+    y.append(current_temp_reading)
+    y_time.append(time.time()-start_time)
     # if current_temp_reading < y[-1] - 5: # A drop of more than 5 degrees between readings is clearly an error.
     #     print "Implausible reading (" + str(current_temp_reading) + ") replaced by previous value of (" + str(y[-1])+")"
     #     current_temp_reading = y[-1]
-    y.append(current_temp_reading)
-    # trigger_refresh_temp_display = True
-    # trigger_adjust_heating = True
-    shot_series.append(shot_pouring)
     
 def pid(y):
     # P: how far from the set_temp is y?
@@ -276,7 +284,12 @@ def adjust_heating_power():
                 power = 0
     elif shot_pouring == True:
         power = power_when_pulling_shot
-    power_series.append(power)
+    # Now that everything is calculated: append all the machine data to lists.
+    # y_time and pump_series are only for information purposes; not needed later in the script.
+    heat_series.append(power)
+    shot_series.append(shot_pouring)
+    pump_series.append(pump_power)
+    
 
 def output_heat():
     if power > 0:
@@ -315,8 +328,9 @@ def pour_shot():
             pump_power = int(seconds_elapsed) + 1 # increase pump power by 10% each second for the first 10 seconds.
         else:
             pump_power = 10
-        if current_weight > 34.0:
+        if current_weight > max_weight:
             end_shot()
+            pump_power = 0
         output_pump(pump_power)
     # Make sure that the thread can exit
     if shot_pouring == False:
@@ -450,13 +464,13 @@ def refresh_temp_display(y, graph_top, graph_bottom, area_graph, area_text_temp)
     # Transform the series of 150 most recent ys into coordinates on the screen
     n_datapoints = int(math.floor((graph_right-20-graph_left)/npixels_per_tempreading))
     subset_y = [y[k] for k in xrange(max(0, len(y)-n_datapoints), len(y))]
-    subset_power_series = [power_series[k] for k in xrange(max(0, len(power_series)-n_datapoints), len(power_series))]
+    subset_heat_series = [heat_series[k] for k in xrange(max(0, len(heat_series)-n_datapoints), len(heat_series))]
     subset_shot_series = [shot_series[k] for k in xrange(max(0, len(shot_series)-n_datapoints), len(shot_series))]
     color_series = [col_red if whatshappening else col_white for whatshappening in subset_shot_series]
     # Find the range of y to be plotted, the tick marks, and draw.
     y_axis = axis_min_max(subset_y)
     tick = BestTick(y_axis[1]-y_axis[0])
-    draw_power(subset_power_series)
+    draw_power(subset_heat_series)
     draw_axes(y_axis, tick, graph_top, graph_bottom-25)
     draw_lines(subset_y, y_axis, tick, graph_top, graph_bottom-25, color_series)
     if trigger_stop_scale == True:
@@ -627,15 +641,19 @@ def read_voltage():
         print "read_voltage thread exited"
         thread.exit()
 
+
 def voltages_to_weight():
     # Conversion in grams every 10th of a second
+    global weight_series, weight_series_time
     while trigger_stop_scale == False:
         convert_volts()
         lcd.fill(col_background, rect = area_text_temp)
         display_text('{0:.1f}'.format(current_weight) + " g.", (5, 5), 60, col_text)
         pygame.display.update(area_text_temp)
-        time.sleep(.1)
         sd_grams = sd(voltsdiff)*scaling[1]/(len(voltsdiff)**0.5)
+        weight_series_time.append(time.time() - start_time)
+        weight_series.append(current_weight)
+        time.sleep(.1)
         # print "w = %0.1f, sd = %0.4f" % (current_weight, sd_grams)
     if trigger_stop_scale == True:
         print "voltage_to_weight thread exited"
@@ -697,7 +715,7 @@ def display_confirm_shutdown_menu():
     display_menu_items(items, m_item_selected, m)
 
 def end_shot():
-    global time_shot_stopped, shot_pouring
+    global time_shot_stopped, shot_pouring, pump_power
     shot_pouring = False
     pump_power = 0
     GPIO.output(pump_pin, 0)
@@ -820,7 +838,7 @@ def button4(channel):
             # Asking for confirmation
             display_confirm_shutdown_menu()
             if (button4_repress == True) & (m_item_selected % m == 0): 
-                # Save data in json file (y, power_series,)
+                # Save data in json file (y, heat_series,)
                 # Save settings (temperature, preinfusion, etc.) in another json file to be loaded later on.
                 GPIO.cleanup()
                 pygame.quit()
@@ -830,6 +848,14 @@ def button4(channel):
                 m_item_selected = 0
                 button4_repress = False
                 display_main_menu()
+                # Hidden feature: Cancel shutdown will save logs.
+                json.dump({"y": list(y),
+                           "y_time": list(y_time),
+                           "shot_series": list(shot_series),
+                           "heat_series": list(heat_series),
+                           "pump_series": list(pump_series),
+                           "weight_series": list(weight_series),
+                           "weight_series_time": list(weight_series_time)}, open("log_espresso.json", "w"))
         elif n_item_selected % n == 5: 
             # Backflush
             if backflush_on == False:
@@ -894,6 +920,8 @@ thread.start_new_thread(thread_heat, ())
 thread.start_new_thread(thread_refresh_timer_display, ())
 thread.start_new_thread(thread_refresh_temp_display, ())
 thread.start_new_thread(thread_refresh_buttons, ())
+
+start_time = time.time()
 
 try:
     while True:
