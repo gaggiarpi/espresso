@@ -22,6 +22,10 @@ from collections import deque
 # Remember that the PiTFT display uses the following GPIO pins: all the hardware SPI pins (SCK, MOSI, MISO, CE0, CE1), and GPIO 24 and 25.
 # The 4 microswitches on the side of the display use: GPIO 17, 22, 23, 27 (from top to bottom)
 
+sys.stdout = open('/home/pi/stdout.txt', 'w', 0)
+# This redirects stdout to a file. 0 means no buffering. Each new line is redirected immediately.
+
+
 GPIO.setmode(GPIO.BCM)
 
 button1_pin = 17
@@ -132,14 +136,40 @@ pulse_sequence = [[0,0,0,0,0,0,0,0,0,0], # 0% power
 # Closed-loop temperature control: PID parameters:
 
 kP = 0.07
-kI = 0.05
-kD = 0.90
+kI = 0.08
+kD = 1.50
+#kI = 0.05
+#kD = 0.90
 iMin = 0.0
 iMax = 1.0
 
 # Open-loop temperature control
 
-power_when_pulling_shot = 30
+power_when_pulling_shot = 28
+
+# Remember: it's a 1,425 Watt boiler.
+# [1 joule = 0.2386634845 Cal
+# 1 mean calorie = 4.190 joule]
+#
+# In 1 second, the boiler produces 1425 Watts = 1425 joules = 340.1 calories of energy.
+#
+# 1 calorie = energy needed to heat 1 gram of water by 1 degree celsius:
+#
+# cal_needed = temp_delta_Celsius * water_mass_in_grams
+# cal_needed = (92C - 20C) * 36g
+# cal_needed = 72 * 36 = 2592
+#
+# 2592 calories can be produced by turning the boiler on for 2592/340.1 = 7.62 seconds.
+# If the shot takes 32 seconds, that's 7.62 / 32 = 24% of the power of the boiler.
+#
+# Assuming no loss: to heat up 36g of water over 32 seconds, from 20 to 92 degrees, the boiler needs 24% of its full power.
+# 
+# Note: more than 36g of water goes through the boiler for a 36g shot (wet puck + 3 way valve)
+# The formula steam_on should be:
+# percent_on = 0.211 * (water)/(shot_time + preheat_time)
+# where: water = shot_weight*91% + water_in_puck + water_through_3-way_valve (assuming 18% extraction, there's 9% tds in the cup for a 1:2 coffee/water ratio)
+#
+# found that after a 36g shot, the portafilter was 22g heavier (nothing came out of the 3-way valve). that's .211*(36*.9+22)/33 = 35% power needed.
 
 # Time in seconds when the pump needs to stay idle before shot after button 4 is pressed, in order to tare the scale.
 
@@ -156,7 +186,7 @@ shot_pouring = False
 old_shot_pouring = False
 seconds_elapsed = 0.0
 
-time_shot_stopped = time.time()-10
+end_shot_time = time.time()-10
 trigger_stop_scale = True
 
 menu = 0 # Other options: 0 = main menu; 1 = settings menu
@@ -168,8 +198,8 @@ old_backflush_on = False
 flush_on = False
 old_flush_on = False
 
-shot_temp = 90
-steam_temp = 90
+shot_temp = 92
+steam_temp = 92
 set_temp = shot_temp
 old_set_temp = 0
 power = 0
@@ -233,7 +263,7 @@ def read_temp():
     # global y, trigger_refresh_temp_display, trigger_adjust_heating
     current_temp_reading = read_sensor()
     y.append(current_temp_reading)
-    y_time.append(time.time()-start_time)
+    y_time.append(time.time()-start_script_time)
     # if current_temp_reading < y[-1] - 5: # A drop of more than 5 degrees between readings is clearly an error.
     #     print "Implausible reading (" + str(current_temp_reading) + ") replaced by previous value of (" + str(y[-1])+")"
     #     current_temp_reading = y[-1]
@@ -259,7 +289,7 @@ def pid(y):
     #     power = random.choice([2, 4]) # on average power close to equilibrium should be 3%.
     # else:
     #     power = int(round((kP*P + kI*I + kD*D)*50))*2
-    power = int(round((kP*P + kI*I + kD*D)*50))*2
+    power = int(round((kP*P + kI*I + kD*D)*100))
     # We can't go above 100% and below 0% heat.
     if power > 100:
         power = 100
@@ -267,23 +297,34 @@ def pid(y):
         power = 0
     return(float(power))
 
+post_shot = False
+
 def adjust_heating_power():
-    global power
+    global power, post_shot
     if shot_pouring == False:
-        if steaming_on == False: 
-            if (y[-1] > .85 * set_temp) | (y[-1] < 1.15 * set_temp):
+        if (steaming_on == False) & (post_shot == False): 
+            if (y[-1] > .90 * set_temp) & (y[-1] < 105):
                 power = pid(y)
-            elif y[-1] <= .85 * set_temp:
+            elif (y[-1] <= .90 * set_temp):
                 power = 100
-            elif y[-1] >= 1.15 * set_temp:
+            elif (y[-1] >= 105):
                 power = 0
+        elif (steaming_on == False) & (post_shot == True):
+            if y[-1] > set_temp + 1:
+                power = 0 
+            else:
+                power = pid(y)
+                post_shot = False 
         elif steaming_on == True:
             if y[-1] < set_temp:
                 power = 100
             if y[-1] >= set_temp:
                 power = 0
     elif shot_pouring == True:
-        power = power_when_pulling_shot
+        if (y[-1] >= 105):
+                power = 0
+        else:
+            power = power_when_pulling_shot
     # Now that everything is calculated: append all the machine data to lists.
     # y_time and pump_series are only for information purposes; not needed later in the script.
     heat_series.append(power)
@@ -314,23 +355,84 @@ def flush():
         output_pump(10)
     if flush_on == False:
         GPIO.output(pump_pin, 0)
-        print "flush thread exited"
+        # print "flush thread exited"
         thread.exit()
+
+def mva(x, n1, n2):
+    # Moving average of last [n1, n2] values of x
+    return(mean(list(x[i] for i in range(len(list(x))-n1-1,len(list(x))-n2-2, -1))))
+
+max_pump_power = 7.0
+ramp_up_time = 10.0
+
+def interpolate(x, point1, point2):
+    # Find y so that (x, y) falls on the line between (x1, y1) & (x2, y2)
+    # If x < x1, y = y1
+    # If x > x2, y = y2
+    x1, y1 = float(point1[0]), float(point1[1])
+    x2, y2 = float(point2[0]), float(point2[1])
+    if x1 < x < x2: 
+        y_value = y1 + (y2 - y1)/(x2 - x1)*(x - x1)
+    elif x > x2:
+        y_value = y2
+    elif x < x1:
+        y_value = y1
+    return y_value
+
 
 def pour_shot():
     # This function will be run in its own thread
     print "pour_shot thread started"
     # Remember to open the 3-way valve here.
-    global pump_power, shot_pouring, time_shot_stopped
+    global pump_power, shot_pouring, end_shot_time, trigger_update_log_shot, flow_per_second, predicted_end_time, time_too_long, time_too_short, time_way_too_short, current_time
     time.sleep(time_tare+.5)
+    last_adjust = 0.0
+    previous_pump_power = 0
     while shot_pouring == True:
-        if seconds_elapsed <= 9:
-            pump_power = int(seconds_elapsed) + 1 # increase pump power by 10% each second for the first 10 seconds.
-        else:
-            pump_power = 10
+        current_time = time.time() - start_script_time
+        if seconds_elapsed <= ramp_up_time:
+            pump_power = seconds_elapsed/ramp_up_time * (max_pump_power - 1) + 1 # increase pump power continuously during ramp_up_time.
+            if (int(pump_power) != previous_pump_power):
+                trigger_update_log_shot = True
+        elif (seconds_elapsed > ramp_up_time) & (seconds_elapsed < ramp_up_time + 4):
+            pump_power = max_pump_power
+            if (int(pump_power) != previous_pump_power)|(time.time()-last_log_time >= 1):
+                trigger_update_log_shot = True
+        if (seconds_elapsed - last_adjust >= 1) & (seconds_elapsed >= ramp_up_time + 4) & (mva(weight_series, 0, 9)- mva(weight_series, 10, 19) > 0):
+            flow_per_second = (mva(weight_series, 0, 9) - mva(weight_series, 10, 19))/(mva(weight_series_time, 0, 9) - mva(weight_series_time, 10, 19))
+            predicted_end_time = seconds_elapsed + (max_weight - current_weight) / flow_per_second 
+            time_too_long      = interpolate(seconds_elapsed, (10,50), (25,36))
+            time_too_short     = interpolate(seconds_elapsed, (10,40), (25,33))
+            time_way_too_short = interpolate(seconds_elapsed, (10,35), (25,30))
+
+            if (predicted_end_time > time_too_long):
+                pump_power += 1
+            elif (predicted_end_time > time_way_too_short) & (predicted_end_time < time_too_short):
+                pump_power -= 1
+            elif (predicted_end_time <= time_way_too_short):
+                 pump_power -= 2
+
+            if pump_power < 1:
+                pump_power = 1
+            if pump_power > 10:
+                pump_power = 10
+                
+            last_adjust = seconds_elapsed
+            trigger_update_log_shot = True
+            print "At %0.1f sec, weight = %0.1f, flow = %0.2f g/s, predicted end time = %0.1f, pump_power = %s" %(seconds_elapsed,current_weight, flow_per_second, predicted_end_time, pump_power)
+            # Need to add a log_weight thread, to save this data in a file.
+            # Log every second, starting as soon as the timer starts, ending 5 seconds after the end of the shot
         if current_weight > max_weight:
             end_shot()
             pump_power = 0
+            flow_per_second = 0
+            predicted_end_time = 0
+            time_too_long      = 0
+            time_too_short     = 0
+            time_way_too_short = 0
+            trigger_update_log_shot = True
+        pump_power = int(pump_power)
+        previous_pump_power = pump_power
         output_pump(pump_power)
     # Make sure that the thread can exit
     if shot_pouring == False:
@@ -338,20 +440,104 @@ def pour_shot():
         print "pour_shot thread exited"
         thread.exit()
 
+flow_per_second = 0
+predicted_end_time = 0
+time_too_long = 0
+time_too_short = 0
+time_way_too_short = 0
+current_time = 0
+
+log_current_time = []
+log_current_weight = []
+log_flow_per_second = []
+log_predicted_end_time = []
+log_pump_power = []
+log_time_too_long = []
+log_time_too_short = []
+log_time_way_too_short = []
+log_start_shot_time = []
+last_log_time = 0
+trigger_update_log_shot = False
+
+def update_log_shot():
+    global last_log_time, trigger_update_log_shot
+    while log_shot == True:
+        if (trigger_update_log_shot == True):
+            log_current_time.append(current_time)
+            log_current_weight.append(current_weight)
+            log_flow_per_second.append(flow_per_second)
+            log_predicted_end_time.append(predicted_end_time) 
+            log_pump_power.append(pump_power)
+            log_time_too_long.append(time_too_long)
+            log_time_too_short.append(time_too_short)
+            log_time_way_too_short.append(time_way_too_short)
+            last_log_time = time.time()
+            trigger_update_log_shot = False
+        time.sleep(.02)
+    if log_shot == False:
+        start = start_shot_time - start_script_time
+        end   = end_shot_time   - start_script_time
+        filename = "/home/pi/logs/log_shot" + time.strftime('%Y-%b-%d-%H%M') + ".json"
+        json.dump({"time": list(log_current_time),
+                   "weight": list(log_current_weight),
+                   "flow_per_second": list(log_flow_per_second),
+                   "predicted_end_time": list(log_predicted_end_time),
+                   "pump_power": list(log_pump_power),
+                   "t0": list(log_time_too_long),
+                   "t1": list(log_time_too_short),
+                   "t2": list(log_time_way_too_short),
+                   "full_weight_series": list(weight_series),
+                   "full_weight_series_time": list(weight_series_time),
+                   "start": start,
+                   "end": end}, open(filename, "w"))
+        thread.exit()
+
 def counting_seconds():
     # This function will be run in its own thread
-    print "counting_seconds thread started"
-    global seconds_elapsed, trigger_refresh_timer
+    # print "counting_seconds thread started"
+    global seconds_elapsed, trigger_refresh_timer, log_shot, start_shot_time
     time.sleep(time_tare+.5)
-    start = time.time()
+    log_shot = True
+    start_shot_time = time.time()
+    thread.start_new_thread(update_log_shot, ())
     while shot_pouring == True:
-        seconds_elapsed = math.floor((time.time() - start)*10)/10
+        seconds_elapsed = math.floor((time.time() - start_shot_time)*10)/10
         trigger_refresh_timer = True
         time.sleep(.1)
     # Make sure that the thread can exit
     if shot_pouring == False:
-        print "counting_seconds thread exited"
+        # print "counting_seconds thread exited"
         thread.exit()
+
+def end_shot():
+    global end_shot_time, shot_pouring, pump_power, post_shot
+    shot_pouring = False
+    pump_power = 0
+    GPIO.output(pump_pin, 0)
+    post_shot = True
+    # Remember to close the 3-way valve here.
+    end_shot_time = time.time()
+    thread.start_new_thread(wait_after_shot_and_refresh, ())
+
+def wait_after_shot_and_refresh():
+    global trigger_refresh_temp_display, trigger_stop_scale, last_weight, last_timer, log_shot, trigger_update_log_shot, current_time
+    while time.time() - end_shot_time < 5:
+        if time.time() - last_log_time >= .5:
+            current_time = time.time() - start_script_time
+            trigger_update_log_shot = True
+        time.sleep(.02)
+    if time.time() - end_shot_time >= 5:
+        reset_graph_area(menu, shot_pouring)
+        lcd.fill(col_background, area_timer)
+        pygame.display.update(area_timer)
+        refresh_temp_display(y, graph_top, graph_bottom, area_graph, area_text_temp)
+        trigger_refresh_temp_display = True
+        trigger_stop_scale = True
+        last_weight = current_weight
+        last_timer = seconds_elapsed
+        log_shot = False
+        thread.exit()
+
 
 ######################################
 # DISPLAY INFO / MENUS ON THE SCREEN #
@@ -436,16 +622,27 @@ def draw_lines(subset_y, y_axis, tick, graph_top, graph_bottom, color_series):
 def draw_power(power_data):
     for j in xrange(0, len(power_data)):
         pygame.draw.line(lcd, col_orange, (graph_left+npixels_per_tempreading*j, 220), (graph_left+npixels_per_tempreading*j, int(220-power_data[j]/4)),1)
-        
+
+j = 0
+
 def draw_belowgraph():
+    global j
     string = "T: " + str(set_temp) + u"\u2103" + "  -  H: " + str(int(power)) + "%"
     if steaming_on == True:
         string = string + "  -  Steam"
     if steaming_on == False:
-        if preinf == True:
-            string = string + "  -  Preinfusion"
-        else:
-            string = string + " - No preinfusion"
+        # Update the rest of the display only every 2 refreshes
+        if (j % 8 < 2): # 0-1
+            minutes = int((time.time() - start_script_time)/60)
+            string = string + "  -  On: %s min." %(minutes)
+        elif (j % 8 < 4): # 2-3
+            string = string + "  -  Stop: %s g." %(max_weight)
+        elif (j % 8 < 6): # 4-5
+            string = string + "  -  Preinf: %ss." %(ramp_up_time)
+        elif (j % 8 < 8): # 6-7
+            maxp = int(max_pump_power*10)
+            string = string + "  -  Preinf: 0-%s%%" %(maxp)
+        j += 1
     display_text(string, area_belowgraph[0], 25, col_text)
 
 def refresh_timer_display(seconds_elapsed, area_timer):
@@ -522,7 +719,7 @@ def refresh_buttons(menu, shot_pouring, steaming_on, backflush_on, flush_on):
     # Same as time: only refresh if something changes.
     global old_menu, old_set_temp, old_shot_pouring, old_steaming_on, old_backflush_on, old_flush_on
     if (menu != old_menu) | (shot_pouring != old_shot_pouring) | (steaming_on != old_steaming_on) | (backflush_on != old_backflush_on) | (flush_on != old_flush_on):
-        print "Refreshing button icons"
+        # print "Refreshing button icons"
         lcd.fill(col_background, rect = area_icons)
         draw_buttons(menu, shot_pouring, steaming_on, backflush_on, flush_on)
         pygame.display.update(area_icons)
@@ -535,13 +732,13 @@ def refresh_buttons(menu, shot_pouring, steaming_on, backflush_on, flush_on):
 def reset_graph_area(menu, shot_pouring):
     global area_graph, graph_top, graph_bottom, graph_left, graph_right, npixels_per_tempreading
     if (menu == 0) & (shot_pouring == False):
-        print "Big graph area"
+        # print "Big graph area"
         lcd.fill(col_background, rect = area_graph)
         pygame.display.update(area_graph)
         area_graph = ((0,65),(280,155))
         npixels_per_tempreading = 2
     elif (menu == 1)|(shot_pouring == True):
-        print "Small graph area"
+        # print "Small graph area"
         lcd.fill(col_background, rect = area_graph)
         pygame.display.update(area_graph)
         area_graph = ((0,65),(140,155))
@@ -552,10 +749,11 @@ def reset_graph_area(menu, shot_pouring):
     graph_right = area_graph[0][0] + area_graph[1][0]
 
 def display_pump_power():
+    global old_pump_power
     old_pump_power = -1        
     while (trigger_stop_scale == False) | (flush_on == True):
         if (pump_power != old_pump_power):
-            print "display pump power update"
+            # print "display pump power update"
             lcd.fill(col_background, rect = (200, 65, 70, 155))
             display_text("Pump", (200, 180), 25, col_text)
             display_text(str(pump_power*10) + "%", (202 if pump_power == 10 else 206, 200), 25, col_text)
@@ -567,7 +765,7 @@ def display_pump_power():
             old_pump_power = pump_power
         time.sleep(.01)
     if trigger_stop_scale == True:
-        print "Exiting display pump power thread"
+        # print "Exiting display pump power thread"
         thread.exit()
 
 area_menu = ((150, 65), (130, 155))
@@ -589,7 +787,7 @@ def backflush():
         i = i+1
     backflush_on = False
     display_main_menu()
-    print "Exiting backflush thread"
+    # print "Exiting backflush thread"
     thread.exit()
 
 def volts():
@@ -606,18 +804,19 @@ def sd(x):
     return ((math.fsum(sqdev))/(len(x)-1))**.5
 
 def convert_volts():
-    global current_weight, prev_weight, mva_voltsdiff, tare_weight
+    global current_weight, prev_weight, mva_voltsdiff, tare_weight, displayed_weight
     mva_voltsdiff = mean(voltsdiff)
     current_weight = scaling[0] + mva_voltsdiff*scaling[1] - tare_weight
     # if abs(current_weight) <= 0.1:
     #     prev_tare_weight = tare_weight
     #     tare_weight += current_weight
     #     current_weight = current_weight + prev_tare_weight - tare_weight
-    if (abs(round(current_weight,1)) < 0.1) & (current_weight < 0):
-        current_weight = -current_weight # This is just to get rid of these annoying "-0.0" weight measurements.
-    if ((abs(current_weight - prev_weight[0])<.1) |
-       ((abs(current_weight - prev_weight[0])<.2) & (prev_weight[0] == prev_weight[1]))):
-        current_weight = prev_weight[0]
+    displayed_weight = current_weight
+    if (abs(round(displayed_weight,1)) < 0.1) & (displayed_weight < 0):
+        displayed_weight = -displayed_weight # This is just to get rid of these annoying "-0.0" weight measurements.
+    if ((abs(displayed_weight - prev_weight[0])<.1) |
+       ((abs(displayed_weight - prev_weight[0])<.2) & (prev_weight[0] == prev_weight[1]))):
+        displayed_weight = prev_weight[0]
     prev_weight = [current_weight, prev_weight[0], prev_weight[1], prev_weight[2]]
 
 def tare():
@@ -630,7 +829,7 @@ def tare():
         time.sleep(time_tare/3)
     tare_weight += current_weight
     prev_weight = [0.0]*4
-    print "Tare"
+    # print "Tare"
 
 def read_voltage():
     # Voltages are read 16 times per second
@@ -638,7 +837,7 @@ def read_voltage():
         volts()
         time.sleep(1/round(sps, 0) + .0001) # E.g. if sps = 250: take a measurement every 0.0041 sec
     if trigger_stop_scale == True:
-        print "read_voltage thread exited"
+        # print "read_voltage thread exited"
         thread.exit()
 
 
@@ -648,15 +847,15 @@ def voltages_to_weight():
     while trigger_stop_scale == False:
         convert_volts()
         lcd.fill(col_background, rect = area_text_temp)
-        display_text('{0:.1f}'.format(current_weight) + " g.", (5, 5), 60, col_text)
+        display_text('{0:.1f}'.format(displayed_weight) + " g.", (5, 5), 60, col_text)
         pygame.display.update(area_text_temp)
         sd_grams = sd(voltsdiff)*scaling[1]/(len(voltsdiff)**0.5)
-        weight_series_time.append(time.time() - start_time)
+        weight_series_time.append(time.time() - start_script_time)
         weight_series.append(current_weight)
         time.sleep(.1)
         # print "w = %0.1f, sd = %0.4f" % (current_weight, sd_grams)
     if trigger_stop_scale == True:
-        print "voltage_to_weight thread exited"
+        # print "voltage_to_weight thread exited"
         thread.exit()
 
 ##################################################################
@@ -714,29 +913,6 @@ def display_confirm_shutdown_menu():
     m = len(items)
     display_menu_items(items, m_item_selected, m)
 
-def end_shot():
-    global time_shot_stopped, shot_pouring, pump_power
-    shot_pouring = False
-    pump_power = 0
-    GPIO.output(pump_pin, 0)
-    # Remember to close the 3-way valve here.
-    time_shot_stopped = time.time()
-    thread.start_new_thread(wait_after_shot_and_refresh, ())
-
-def wait_after_shot_and_refresh():
-    while time.time() - time_shot_stopped < 5:
-        time.sleep(.1)
-    if time.time() - time_shot_stopped >= 5:
-        global trigger_refresh_temp_display, trigger_stop_scale, last_weight, last_timer
-        reset_graph_area(menu, shot_pouring)
-        lcd.fill(col_background, area_timer)
-        pygame.display.update(area_timer)
-        refresh_temp_display(y, graph_top, graph_bottom, area_graph, area_text_temp)
-        trigger_refresh_temp_display = True
-        trigger_stop_scale = True
-        last_weight = current_weight
-        last_timer = seconds_elapsed
-        thread.exit()
     
 def button1(channel):
     print "Button 1 pressed"
@@ -785,8 +961,8 @@ def button3(channel):
             display_confirm_shutdown_menu()
 
 def button4(channel):
-    # print "Button 4 pressed"
-    global shot_pouring, pump_power, time_shot_stopped, trigger_stop_scale, steaming_on, set_temp, button4_repress, m_item_selected, n_item_selected, menu, submenu, backflush_on, flush_on
+    print "Button 4 pressed"
+    global shot_pouring, pump_power, end_shot_time, trigger_stop_scale, steaming_on, set_temp, button4_repress, m_item_selected, n_item_selected, menu, submenu, backflush_on, flush_on
     
     # Check if button 4 is called from within a submenu
     # This will change the behavior of button4: first button4 press: submenu is displayed; second button4 press: choice is selected.
@@ -827,8 +1003,11 @@ def button4(channel):
         if n_item_selected % n == 1: 
             # Steam
             if (steaming_on == False):
-                set_temp = steam_temp
-                steaming_on = True
+                ####### STEAMING DISABLED ########
+                set_temp = shot_temp
+                steaming_on = False
+                # set_temp = steam_temp
+                # steaming_on = True
             elif steaming_on == True:
                 set_temp = shot_temp
                 steaming_on = False
@@ -842,20 +1021,19 @@ def button4(channel):
                 # Save settings (temperature, preinfusion, etc.) in another json file to be loaded later on.
                 GPIO.cleanup()
                 pygame.quit()
-                os.system("sudo shutdown now")
+                sys.exit()
+                # os.system("sudo shutdown now")
             elif (button4_repress == True) & (m_item_selected % m == 1):
                 submenu = 0
                 m_item_selected = 0
                 button4_repress = False
                 display_main_menu()
+                filename = "/home/pi/logs/log_temp" + time.strftime('%Y-%b-%d-%H%M') + ".json"  
                 # Hidden feature: Cancel shutdown will save logs.
                 json.dump({"y": list(y),
                            "y_time": list(y_time),
                            "shot_series": list(shot_series),
-                           "heat_series": list(heat_series),
-                           "pump_series": list(pump_series),
-                           "weight_series": list(weight_series),
-                           "weight_series_time": list(weight_series_time)}, open("log_espresso.json", "w"))
+                           "heat_series": list(heat_series)}, open(filename, "w"))
         elif n_item_selected % n == 5: 
             # Backflush
             if backflush_on == False:
@@ -864,10 +1042,6 @@ def button4(channel):
                 backflush_on = False
     
         
-GPIO.add_event_detect(button1_pin, GPIO.BOTH, callback=button1, bouncetime = 500)
-GPIO.add_event_detect(button2_pin, GPIO.BOTH, callback=button2, bouncetime = 500)
-GPIO.add_event_detect(button3_pin, GPIO.BOTH, callback=button3, bouncetime = 500)
-GPIO.add_event_detect(button4_pin, GPIO.BOTH, callback=button4, bouncetime = 500)
 
 
 ##################################
@@ -915,13 +1089,21 @@ def thread_refresh_timer_display():
             trigger_refresh_timer = False
         time.sleep(.01)
 
+start_script_time = time.time()
+
 thread.start_new_thread(thread_read_temp, ())
 thread.start_new_thread(thread_heat, ())
 thread.start_new_thread(thread_refresh_timer_display, ())
 thread.start_new_thread(thread_refresh_temp_display, ())
 thread.start_new_thread(thread_refresh_buttons, ())
 
-start_time = time.time()
+time.sleep(.5) # will this prevent mysterious/random wrong button presses at startup?
+
+GPIO.add_event_detect(button1_pin, GPIO.RISING, callback=button1, bouncetime = 500)
+GPIO.add_event_detect(button2_pin, GPIO.RISING, callback=button2, bouncetime = 500)
+GPIO.add_event_detect(button3_pin, GPIO.RISING, callback=button3, bouncetime = 500)
+GPIO.add_event_detect(button4_pin, GPIO.RISING, callback=button4, bouncetime = 500)
+
 
 try:
     while True:
