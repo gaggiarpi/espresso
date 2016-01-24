@@ -112,7 +112,7 @@ sensitivity_factor = 2 # The sensitivity factor determines the length of the vol
 adc_resolution = 2048
 scaling = [-287.35410, 430.74201]
 
-print "Scale resolution = %0.4f grams" %(round(adc_resolution,0)/(2**15)*scaling[1]/1000.0)
+# print "Scale resolution = %0.4f grams" %(round(adc_resolution,0)/(2**15)*scaling[1]/1000.0)
 
 voltsdiff=deque([-adc.readADCDifferential01(adc_resolution, sps)/1000.0]*int(sps/sensitivity_factor), int(sps/sensitivity_factor))
 tare_weight = 0.0
@@ -136,22 +136,14 @@ pulse_sequence = [[0,0,0,0,0,0,0,0,0,0], # 0% power
 
 # Closed-loop temperature control: PID parameters:
 
-# kP = 0.12
-# kI = .13
-# kD = 1.50
-
-# Initial settings (with steady-state error -.2)
-# kP = 0.07
-# kI = 0.08
-# kD = 1.50
-
 kP = 0.07
-kI = 0.10
-kD = 2.30
+kI = 0.12
+kD = 3.50
+
 
 # Open-loop temperature control
 
-power_when_pulling_shot = 34
+power_when_pulling_shot = 38
 
 # Remember: it's a 1,425 Watt boiler.
 # [1 joule = 0.2386634845 Cal
@@ -162,7 +154,7 @@ power_when_pulling_shot = 34
 # 1 calorie = energy needed to heat 1 gram of water by 1 degree celsius:
 #
 # cal_needed = temp_delta_Celsius * water_mass_in_grams
-# cal_needed = (92C - 20C) * 36g
+# cal_needed = (92C - 20C) * water_mass_in_grams
 # cal_needed = 72 * 36 = 2592
 #
 # 2592 calories can be produced by turning the boiler on for 2592/340.1 = 7.62 seconds.
@@ -172,21 +164,36 @@ power_when_pulling_shot = 34
 # 
 # Note: more than 36g of water goes through the boiler for a 36g shot (wet puck + 3 way valve)
 # The formula steam_on should be:
-# percent_on = 0.211 * (water)/(shot_time + preheat_time)
+# percent_on = 72/340.1 * water/time = 0.211 * (water)/(heat_time + preheat_time)
 # where: water = shot_weight*91% + water_in_puck + water_through_3-way_valve (assuming 18% extraction, there's 9% tds in the cup for a 1:2 coffee/water ratio)
 #
-# Found that after a 36g shot, the portafilter was 22g heavier (nothing came out of the 3-way valve). that's .211*(36*.9+22)/(33.5) = 34% power needed.
+# Found that after a 36g shot, the portafilter was 22g heavier (nothing came out of the 3-way valve). 
+#
+# That's .211*(36*.9+22)/(25 + 3) = 40% power needed.
 #
 # This is an upper limit. A slightly declining intrashot temp profile might be desirable for recovery time between shots (and taste?)
 # Cooling down the boiler takes longer than heating it back up to set temperature
 
 # Time in seconds when the pump needs to stay idle before shot after button 4 is pressed, in order to tare the scale.
+#
+# Assuming water was at 20 degrees, and (36.9+22) of water was heated, and heat was on for 25+3.5 = 28.5 seconds.
+# with this amount of calories: cold water could be heated up to 20+(28.5*.4*340)/(36*0.9+22) about 91 degrees.
+# Note: the boiler capacity is about 100g. 
 
-time_tare = 1.5
+time_preheat = 3
 
 #####################################################################
 # Global variables used to share state across functions and threads #
 #####################################################################
+
+post_shot = False
+
+pot_value = 0
+read_pot_on = False
+
+max_pump_power = 7.0
+ramp_up_time = 10.0
+
 
 last_timer = 0
 last_weight = 0
@@ -239,6 +246,7 @@ trigger_refresh_temp_display = False
 trigger_heat = False
 trigger_refresh_timer = False
 
+
 ####################################
 # UI area positions and dimensions #
 ####################################
@@ -280,12 +288,13 @@ def pid(y):
     # P: how far from the set_temp is y?
     P = set_temp - y[-1]
     # I: how far from the set_temp has y been on average over the last 60*.80 = 48 seconds?
+    # I = sum(set_temp - y[-i] for i in xrange(1, len(y)))
     I = sum(set_temp - y[-i] for i in xrange(1, min(len(y), 60)))/min(len(y), 60)
     # Make sure values of I stay between 0 and 1, or they will have too much weight on the final value returned by the PID(?)
-    # if I > 1:
-    #     I = 1
-    # elif I < -1:
-    #     I = -1
+    if I > 1:
+        I = 1
+    elif I < -1:
+        I = -1
     # D: how has y evolved over the last 2 seconds (4 readings)?
     if len(y) < 2:
         D = 0
@@ -306,21 +315,24 @@ def pid(y):
         power = 0
     return(power)
 
-post_shot = False
+
+
 
 def adjust_heating_power():
     global power, post_shot
     if shot_pouring == False:
         if (steaming_on == False) and (post_shot == False): 
-            if (y[-1] > .90 * set_temp) and (y[-1] < 105):
+            if (y[-1] > .90 * set_temp) and (y[-1] < 100):
                 power = pid(y)
             elif (y[-1] <= .90 * set_temp):
                 power = 100
-            elif (y[-1] >= 105):
+            elif (y[-1] >= 100):
                 power = 0
         elif (steaming_on == False) and (post_shot == True):
-            if y[-1] > set_temp + 1:
-                power = pid(y)                  # Change this line to specify a post-shot heat power, if needed. 
+            if (y[-1] > set_temp - 1) or (y[-1] - y[-2] < -0.125 and y[-2] - y[-3] < -0.125): # Wait until temperature goes back down and stabilizes somewhat before handing temp control back to the PID
+                power = 0
+            # if y[-1] > set_temp + 1:
+            #     power = pid(y)                  # Change this line to specify a post-shot heat power, if needed.
             else:
                 power = pid(y)
                 post_shot = False 
@@ -360,8 +372,6 @@ def output_pump(pump_power):
             GPIO.output(pump_pin, pulses[i])
             time.sleep(.02) # wait 20 ms between pulses; could increase this to .04 to make it easier on the relay and the pump...
 
-pot_value = 0
-read_pot_on = False
 
 def read_pot():
     global pot_value
@@ -391,8 +401,6 @@ def mva(x, n1, n2):
     # Moving average of last [n1, n2] values of x
     return(mean(list(x[i] for i in range(len(list(x))-n1-1,len(list(x))-n2-2, -1))))
 
-max_pump_power = 7.0
-ramp_up_time = 10.0
 
 def interpolate(x, point1, point2):
     # Find y so that (x, y) falls on the line between (x1, y1) and (x2, y2)
@@ -414,7 +422,7 @@ def pour_shot():
     print "pour_shot thread started"
     # Remember to open the 3-way valve here.
     global pump_power, shot_pouring, end_shot_time, trigger_update_log_shot, flow_per_second, predicted_end_time, time_too_long, time_too_short, time_way_too_short, current_time
-    time.sleep(time_tare+.5)
+    time.sleep(time_preheat+.5)
     last_adjust = 0.0
     previous_pump_power = 0
     while shot_pouring == True:
@@ -473,6 +481,8 @@ def pour_shot():
                 # Log every second, starting as soon as the timer starts, ending 5 seconds after the end of the shot
         
         if current_weight > max_weight:
+            # Note that this could be better: instead of stopping at max_weight, recognize that weight keeps increasing for 0.6 seconds or so after the shot.
+            # if (current_weight > 32) and current_weight + 0.6*flow_per_second >= 36:
             end_shot()
             pump_power = 0
             flow_per_second = 0
@@ -531,29 +541,30 @@ def update_log_shot():
     if log_shot == False:
         start = start_shot_time - start_script_time
         end   = end_shot_time   - start_script_time
-        filename = "/home/pi/logs/log_shot" + time.strftime('%Y-%m-%d-%H%M') + ".json"
-        json.dump({"time": list(log_current_time),
-                   "weight": list(log_current_weight),
-                   "flow_per_second": list(log_flow_per_second),
-                   "predicted_end_time": list(log_predicted_end_time),
-                   "pump_power": list(log_pump_power),
-                   "t0": list(log_time_too_long),
-                   "t1": list(log_time_too_short),
-                   "t2": list(log_time_way_too_short),
-                   "full_weight_series": list(weight_series),
-                   "full_weight_series_time": list(weight_series_time),
-                   "start": start,
-                   "max_weight": max_weight,
-                   "end": end}, open(filename, "w"))
-        os.system(str("sudo R --vanilla -f /home/pi/flow_analysis.R --args " + filename))
-        # flow_analysis.R will generate graphs with ggplot, save them as pdf, and run send_email.py to send the pdf & json files as attachment
+        if end - start > 15: # Only save logs of shots >= 15 seconds; don't bother otherwise.
+            filename = "/home/pi/logs/log_shot" + time.strftime('%Y-%m-%d-%H%M') + ".json"
+            json.dump({"time": list(log_current_time),
+                       "weight": list(log_current_weight),
+                       "flow_per_second": list(log_flow_per_second),
+                       "predicted_end_time": list(log_predicted_end_time),
+                       "pump_power": list(log_pump_power),
+                       "t0": list(log_time_too_long),
+                       "t1": list(log_time_too_short),
+                       "t2": list(log_time_way_too_short),
+                       "full_weight_series": list(weight_series),
+                       "full_weight_series_time": list(weight_series_time),
+                       "start": start,
+                       "max_weight": max_weight,
+                       "end": end}, open(filename, "w"))
+            os.system(str("sudo R --vanilla -f /home/pi/flow_analysis.R --args " + filename))
+            # flow_analysis.R will generate graphs with ggplot, save them as pdf, and run send_email.py to send the pdf & json files as attachment
         return
 
 def counting_seconds():
     # This function will be run in its own thread
     # print "counting_seconds thread started"
     global seconds_elapsed, trigger_refresh_timer, log_shot, start_shot_time
-    time.sleep(time_tare+.5)
+    time.sleep(time_preheat+.5)
     log_shot = True
     start_shot_time = time.time()
     thread.start_new_thread(update_log_shot, ())
@@ -604,7 +615,7 @@ def wait_after_shot_and_refresh():
 
 
 os.putenv('SDL_FBDEV', '/dev/fb1')
-pygame.init()
+pygame.display.init()
 pygame.font.init()
 pygame.mouse.set_visible(False)
 lcd = pygame.display.set_mode((320, 240))
@@ -888,14 +899,15 @@ def convert_volts():
         displayed_weight = prev_weight[0]
     prev_weight = [current_weight, prev_weight[0], prev_weight[1], prev_weight[2]]
 
-def tare():
+# Call this function "preheat". Display "Preheating...", and make it last 4 seconds or so. And maybe associate it with a predefined preheat power.
+def tare_and_preheat():
     global tare_weight, prev_weight, voltsdiff
     lcd.fill(col_background, rect = area_text_temp)
-    text = "Taring"
+    text = "Preheat"
     for i in range(1, 4):
-        display_text("Taring" + "."*i, (175, 20), 30, col_text)
+        display_text(text + "."*i, (175, 20), 30, col_text)
         pygame.display.update(area_timer)
-        time.sleep(time_tare/3)
+        time.sleep(time_preheat/3)
     tare_weight += current_weight
     prev_weight = [0.0]*4
     # print "Tare"
@@ -1135,7 +1147,7 @@ def button4(channel):
             trigger_stop_scale = False
             thread.start_new_thread(read_voltage, ())
             thread.start_new_thread(voltages_to_weight, ())
-            thread.start_new_thread(tare, ())
+            thread.start_new_thread(tare_and_preheat, ())
             thread.start_new_thread(counting_seconds, ())
             thread.start_new_thread(pour_shot, ())
             thread.start_new_thread(display_pump_power, ())
@@ -1190,8 +1202,15 @@ def button4(channel):
                 thread.start_new_thread(backflush, ())
             elif backflush_on == True:
                 backflush_on = False
-    
 
+def adjust_pid():
+    global kP, kI, kD
+    while True:
+        print "(P = %s, I = %s, D = %s)" %(kP, kI, kD)
+        answer = input("Enter P, I, D: ")
+        kP = answer[0]
+        kI = answer[1]
+        kD = answer[2]
 
 ##################################
 # THREADS REFRESHING THE DISPLAY #
@@ -1209,7 +1228,7 @@ def thread_read_temp():
 def thread_heat():
     global trigger_heat
     while True:
-        if trigger_heat == True:
+        if trigger_heat:
             trigger_heat = False
             output_heat()
         else:
@@ -1256,8 +1275,8 @@ uptime_s = uptime.uptime()
 print "Uptime in seconds %s" %(uptime_s)
 
 if uptime_s < 30: # If the script is launched right after boot
-    print "Waiting 8 seconds; hopefully NTPD will have synced properly in the meantime."
-    time.sleep(8) # will it leave enough time for NTPD to sync time over Wifi??? Otherwise start_script_time will be outdated (reflect time at last shutdown).
+    print "Waiting 15 seconds; hopefully NTPD will have synced properly in the meantime."
+    time.sleep(15) # will it leave enough time for NTPD to sync time over Wifi??? Otherwise start_script_time will be outdated (reflect time at last shutdown).
     pass
 
 start_script_time = time.time()
@@ -1270,7 +1289,7 @@ thread.start_new_thread(thread_refresh_timer_display, ())
 thread.start_new_thread(thread_refresh_temp_display, ())
 thread.start_new_thread(thread_refresh_buttons, ())
 thread.start_new_thread(thread_auto_dim_or_shutdown, ())
-
+# thread.start_new_thread(adjust_pid, ())
 
 GPIO.add_event_detect(button1_pin, GPIO.FALLING, callback=button1, bouncetime = 500)
 GPIO.add_event_detect(button2_pin, GPIO.FALLING, callback=button2, bouncetime = 500)

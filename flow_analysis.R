@@ -53,7 +53,7 @@ pdf(height = 8, width = 5, file = graph_filename)
 
 g1 <- ggplot() +
 		geom_hline(yintercept = d$max_weight) + geom_vline(xintercept = d$end - d$start) +
-		geom_segment(data = df[rows,], aes(x = time, y = weight, xend = predicted_end_time, yend = 32), col = "red", alpha = I(1/10), show.legend = FALSE) +
+		geom_segment(data = df[rows,], aes(x = time, y = weight, xend = predicted_end_time, yend = d$max_weight), col = "red", alpha = I(1/10), show.legend = FALSE) +
 		# geom_point(data = df[rows,], aes(x=time, y=weight), col = "red", alpha = I(1/10)) +
 		geom_line( data = dw, aes(x=time, y=weight)) + 
 		labs(title = paste(round(df$weight[nrow(df)],0), "g. in", round(d$end - d$start,0), "s."), y="Weight in grams", x= element_blank()) +
