@@ -7,11 +7,11 @@ d <- fromJSON(file = args)
 
 # d <- fromJSON(file="~/Desktop/log_shot2016-01-10-0055.json")
 
-df <- data.frame(weight = d$weight, time = d$time, t0 = d$t0, t1 = d$t1, t2 = d$t2, flow_per_second = d$flow_per_second, predicted_end_time = d$predicted_end_time, pump_power = d$pump_power*10)
+df <- data.frame(weight = d$weight_filtered, time = d$time, t0 = d$t0, t1 = d$t1, t2 = d$t2, flow_per_second = d$flow_per_second, predicted_end_time = d$predicted_end_time, pump_power = d$pump_power*10)
 df$time <- df$time - d$start
 df <- df[df$time >= 0,]
 
-dw <- data.frame(weight = d$full_weight_series, time = d$full_weight_series_time)
+dw <- data.frame(weight = d$filtered_weight_series, time = d$filtered_time, flow = d$filtered_flow)
 dw$time <- dw$time - d$start
 dw <- dw[dw$time >= 0,]
 

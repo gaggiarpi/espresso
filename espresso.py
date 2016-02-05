@@ -16,6 +16,7 @@ import signal
 import json
 import sys
 import uptime
+import numpy as np
 
 from Adafruit_ADS1x15 import ADS1x15
 from collections import deque
@@ -143,7 +144,7 @@ kD = 3.50
 
 # Open-loop temperature control
 
-power_when_pulling_shot = 38
+power_when_pulling_shot = 28
 
 # Remember: it's a 1,425 Watt boiler.
 # [1 joule = 0.2386634845 Cal
@@ -234,6 +235,9 @@ y = deque([temp0, temp0, temp0], 3600)
 heat_series = deque([0,0,0], 3600)
 shot_series = deque([False, False, False], 3600)
 weight_series = []
+filtered_weight_series = []
+filtered_flow_series = []
+filtered_time = []
 
 y_time = deque([0,0,0], 3600)
 weight_series_time = []
@@ -245,7 +249,7 @@ weight_series_time = []
 trigger_refresh_temp_display = False
 trigger_heat = False
 trigger_refresh_timer = False
-
+filter_on = False
 
 ####################################
 # UI area positions and dimensions #
@@ -389,7 +393,7 @@ def flush():
     read_pot_on = True
     thread.start_new_thread(read_pot, ())
     while flush_on == True:
-        pump_power = int(pot_value / 10)
+        pump_power = int(round(pot_value / 10, 0))
         output_pump(pump_power)
     if flush_on == False:
         read_pot_on = False
@@ -433,7 +437,7 @@ def pour_shot():
         time_way_too_short = interpolate(seconds_elapsed, (10,35), (25,30))
         
         # Simple case: no ramp_up_time. Just apply full power 
-        if (ramp_up_time == 0) and (current_weight <= 4):
+        if (ramp_up_time == 0) and (filtered_weight <= 4):
             # print "Case 0 - no ramp_up_time"
             pump_power = max_pump_power
             if (seconds_elapsed - last_adjust >= 1):
@@ -441,13 +445,13 @@ def pour_shot():
                 trigger_update_log_shot = True
         # First stage of the shot: pump power ramps up to max_pump power over ramp up time and stays there for another 4 seconds.
         # But that's only if weight <= 4 grams. If it's more than 4 grams, pump_power is set according to the rules for Stage 2 of the shot
-        elif (seconds_elapsed <= ramp_up_time) and (current_weight <= 4):
+        elif (seconds_elapsed <= ramp_up_time) and (filtered_weight <= 4):
             # print "Case 1 - ramping up until 4g"
             pump_power = seconds_elapsed/ramp_up_time * (max_pump_power - 1) + 1 # increase pump power continuously during ramp_up_time.
             if (int(pump_power) != previous_pump_power):
                 trigger_update_log_shot = True
                 last_adjust = seconds_elapsed
-        elif (seconds_elapsed > ramp_up_time) and (seconds_elapsed < 14) and (current_weight <= 4) :
+        elif (seconds_elapsed > ramp_up_time) and (seconds_elapsed < 14) and (filtered_weight <= 4) :
             # print "Case 2 - after ramp_up_time, but before 14 seconds, and weight < 4"
             pump_power = max_pump_power
             if (int(pump_power) != previous_pump_power) or (time.time()-last_log_time >= 1):
@@ -456,9 +460,9 @@ def pour_shot():
         else:
             # print "Case 4 - all other: seconds_elapsed = %s, last_adjust = %s " %(seconds_elapsed, last_adjust)
             if (seconds_elapsed - last_adjust >= 1):
-                flow_per_second = (mva(weight_series, 0, 9) - mva(weight_series, 10, 19))/(mva(weight_series_time, 0, 9) - mva(weight_series_time, 10, 19))
+                flow_per_second = filtered_flow
                 if (flow_per_second > 0):
-                    predicted_end_time = seconds_elapsed + (max_weight - current_weight) / flow_per_second 
+                    predicted_end_time = seconds_elapsed + (max_weight - filtered_weight) / flow_per_second 
                 else: # Should never be in this situation: weight was reported as > 4 grams, or we're after 14 seconds, but coffee is not flowing. 
                     predicted_end_time = 100  # The solution: force a pump power increase by reporting a long predicted time.
             
@@ -476,13 +480,13 @@ def pour_shot():
                 
                 last_adjust = seconds_elapsed
                 trigger_update_log_shot = True
-                # print "At %0.1f sec, weight = %0.1f, flow = %0.2f g/s, predicted end time = %0.1f, pump_power = %s" %(seconds_elapsed,current_weight, flow_per_second, predicted_end_time, pump_power)
+                # print "At %0.1f sec, weight = %0.1f, flow = %0.2f g/s, predicted end time = %0.1f, pump_power = %s" %(seconds_elapsed,filtered_weight, flow_per_second, predicted_end_time, pump_power)
                 # Need to add a log_weight thread, to save this data in a file.
                 # Log every second, starting as soon as the timer starts, ending 5 seconds after the end of the shot
         
-        if current_weight > max_weight:
+        if filtered_weight > max_weight:
             # Note that this could be better: instead of stopping at max_weight, recognize that weight keeps increasing for 0.6 seconds or so after the shot.
-            # if (current_weight > 32) and current_weight + 0.6*flow_per_second >= 36:
+            # if (filtered_weight > 32) and filtered_weight + 0.6*flow_per_second >= 36:
             end_shot()
             pump_power = 0
             flow_per_second = 0
@@ -513,6 +517,7 @@ def update_log_shot():
     global last_log_time, trigger_update_log_shot
     log_current_time = []
     log_current_weight = []
+    log_filtered_weight = []
     log_flow_per_second = []
     log_predicted_end_time = []
     log_pump_power = []
@@ -529,6 +534,7 @@ def update_log_shot():
         if (trigger_update_log_shot == True):
             log_current_time.append(current_time)
             log_current_weight.append(current_weight)
+            log_filtered_weight.append(filtered_weight)
             log_flow_per_second.append(flow_per_second)
             log_predicted_end_time.append(predicted_end_time) 
             log_pump_power.append(pump_power)
@@ -545,6 +551,7 @@ def update_log_shot():
             filename = "/home/pi/logs/log_shot" + time.strftime('%Y-%m-%d-%H%M') + ".json"
             json.dump({"time": list(log_current_time),
                        "weight": list(log_current_weight),
+                       "weight_filtered": list(log_filtered_weight),
                        "flow_per_second": list(log_flow_per_second),
                        "predicted_end_time": list(log_predicted_end_time),
                        "pump_power": list(log_pump_power),
@@ -553,6 +560,9 @@ def update_log_shot():
                        "t2": list(log_time_way_too_short),
                        "full_weight_series": list(weight_series),
                        "full_weight_series_time": list(weight_series_time),
+                       "filtered_time": list(filtered_time),
+                       "filtered_weight_series": list(filtered_weight_series),
+                       "filtered_flow_series": list(filtered_flow_series),
                        "start": start,
                        "max_weight": max_weight,
                        "end": end}, open(filename, "w"))
@@ -588,7 +598,7 @@ def end_shot():
     thread.start_new_thread(wait_after_shot_and_refresh, ())
 
 def wait_after_shot_and_refresh():
-    global trigger_refresh_temp_display, trigger_stop_scale, last_weight, last_timer, log_shot, trigger_update_log_shot, current_time
+    global trigger_refresh_temp_display, trigger_stop_scale, last_weight, last_timer, log_shot, trigger_update_log_shot, current_time, filter_on
     while time.time() - end_shot_time < 6:
         if time.time() - last_log_time >= .5:
             current_time = time.time() - start_script_time
@@ -604,6 +614,7 @@ def wait_after_shot_and_refresh():
         last_weight = current_weight
         last_timer = seconds_elapsed
         log_shot = False
+        filter_on = False
         return
 
 
@@ -691,12 +702,12 @@ def draw_axes(y_axis, tick, graph_top, graph_bottom):
             display_text(str(val), (graph_right-15, coord_val-10), 20, col_text) # change this 305 value, based on graph_right, leave space for icons
 
 def draw_lines(subset_y, y_axis, tick, graph_top, graph_bottom, color_series):
-    y_coord  = [coordinates(y_axis, subset_y[j], graph_top, graph_bottom) for j in xrange(0, len(subset_y))]
-    for j in xrange(1, len(y_coord)):
-        pygame.draw.line(lcd, color_series[j-1], (graph_left + npixels_per_tempreading*(j-1), y_coord[j-1]),(graph_left + npixels_per_tempreading*j, y_coord[j]), 1) # 2 is the line thickness here.
     coord_set_temp = coordinates(y_axis, set_temp, graph_top, graph_bottom)
     if (coord_set_temp < graph_bottom) and (coord_set_temp > graph_top): # remember that y coordinates start at 0 from the top of the display
         pygame.draw.line(lcd, col_templine, (graph_left, coord_set_temp), (graph_right-20, coord_set_temp)) # change this 300 value, based on graph_right
+    y_coord  = [coordinates(y_axis, subset_y[j], graph_top, graph_bottom) for j in xrange(0, len(subset_y))]
+    for j in xrange(1, len(y_coord)):
+        pygame.draw.line(lcd, color_series[j-1], (graph_left + npixels_per_tempreading*(j-1), y_coord[j-1]),(graph_left + npixels_per_tempreading*j, y_coord[j]), 1) # 2 is the line thickness here.
 
 def draw_power(power_data):
     for j in xrange(0, len(power_data)):
@@ -870,10 +881,6 @@ def backflush():
     # print "Exiting backflush thread"
     return
 
-def volts():
-    global voltsdiff
-    voltsdiff.append(-adc.readADCDifferential01(adc_resolution, sps)/1000.0)
-
 def mean(x):
     return math.fsum(x)/len(x)
 
@@ -883,25 +890,8 @@ def sd(x):
         sqdev[i] = (x[i] - mean(x))**2
     return ((math.fsum(sqdev))/(len(x)-1))**.5
 
-def convert_volts():
-    global current_weight, prev_weight, mva_voltsdiff, tare_weight, displayed_weight
-    mva_voltsdiff = mean(voltsdiff)
-    current_weight = scaling[0] + mva_voltsdiff*scaling[1] - tare_weight
-    # if abs(current_weight) <= 0.1:
-    #     prev_tare_weight = tare_weight
-    #     tare_weight += current_weight
-    #     current_weight = current_weight + prev_tare_weight - tare_weight
-    displayed_weight = current_weight
-    if (abs(round(displayed_weight,1)) < 0.1) and (displayed_weight < 0):
-        displayed_weight = -displayed_weight # This is just to get rid of these annoying "-0.0" weight measurements.
-    if ((abs(displayed_weight - prev_weight[0])<.1)  or 
-       ((abs(displayed_weight - prev_weight[0])<.2) and (prev_weight[0] == prev_weight[1]))):
-        displayed_weight = prev_weight[0]
-    prev_weight = [current_weight, prev_weight[0], prev_weight[1], prev_weight[2]]
-
-# Call this function "preheat". Display "Preheating...", and make it last 4 seconds or so. And maybe associate it with a predefined preheat power.
 def tare_and_preheat():
-    global tare_weight, prev_weight, voltsdiff
+    global tare_weight, prev_weight, voltsdiff, filter_on
     lcd.fill(col_background, rect = area_text_temp)
     text = "Preheat"
     for i in range(1, 4):
@@ -910,17 +900,42 @@ def tare_and_preheat():
         time.sleep(time_preheat/3)
     tare_weight += current_weight
     prev_weight = [0.0]*4
-    # print "Tare"
+    filter_initialize()
+    filter_on = True
 
 def read_voltage():
+    # Running in its own thread
+    global t1, voltsdiff
     # Voltages are read 16 times per second
     while trigger_stop_scale == False:
-        volts()
-        time.sleep(1/round(sps, 0) + .0001) # E.g. if sps = 16: take a measurement every 0.00626 sec
+        t1 = time.time()
+        try:
+            voltsdiff.append(-adc.readADCDifferential01(adc_resolution, sps)/1000.0)
+        except Exception as e:
+            print e
+            voltsdiff.append(voltsdiff[-1])
+        # print "append voltsdiff: t1 = %s" %t1
     if trigger_stop_scale == True:
         # print "read_voltage thread exited"
         return
 
+weighing_time = time.time()-1
+t1 = time.time()
+
+def convert_volts():
+    global current_weight, prev_weight, mva_voltsdiff, tare_weight, displayed_weight, weighing_time, previous_time
+    mva_voltsdiff = mean(voltsdiff)
+    current_weight = scaling[0] + mva_voltsdiff*scaling[1] - tare_weight
+    previous_time = weighing_time
+    weighing_time = t1
+    # print "converting V into g: last voltsdiff: t1 = %s" %t1
+    displayed_weight = current_weight
+    filtered_weight = current_weight
+    if filter_on == True:
+        # print "filtering: previous_time %s; weighing_time %s" %(previous_time, weighing_time)
+        filter(current_weight, prev_weight[0], weighing_time, previous_time, Q0, R0)
+        displayed_weight = filtered_weight
+    prev_weight = [current_weight, prev_weight[0], prev_weight[1], prev_weight[2]]
 
 def voltages_to_weight():
     # Conversion in grams every 10th of a second
@@ -930,14 +945,56 @@ def voltages_to_weight():
         lcd.fill(col_background, rect = area_text_temp)
         display_text('{0:.1f}'.format(displayed_weight) + " g.", (5, 5), 60, col_text)
         pygame.display.update(area_text_temp)
-        sd_grams = sd(voltsdiff)*scaling[1]/(len(voltsdiff)**0.5)
-        weight_series_time.append(time.time() - start_script_time)
+        # sd_grams = sd(voltsdiff)*scaling[1]/(len(voltsdiff)**0.5)
+        weight_series_time.append(weighing_time - start_script_time)
         weight_series.append(current_weight)
+        if filter_on == True:
+            filtered_time.append(weighing_time - start_script_time)
+            filtered_weight_series.append(filtered_weight)
+            filtered_flow_series.append(filtered_flow)
         time.sleep(.1)
         # print "w = %0.1f, sd = %0.4f" % (current_weight, sd_grams)
     if trigger_stop_scale == True:
         # print "voltage_to_weight thread exited"
         return
+
+def filter_initialize():
+    global Q0, R0, x, P
+    Q0 =np.array([[0.08, 0.00], 
+                  [0.00, 0.08]])
+    R0 = np.array([[2.0, -1.0],
+                  [-1.0, 2.0]])
+    x = np.array([0.0, 0.0])
+    P = np.array([[0.0, 0.0],
+                  [0.0, 0.0]])
+
+def filter(current_weight, prev_weight, time1, time0, Q0, R):
+    global x, P, filtered_weight, filtered_flow
+    dt = time1 - time0
+    z = [current_weight, (current_weight-prev_weight)/dt] 
+    F = np.array([[1.0, dt],
+                  [0.0, 1.0]])
+    if (seconds_elapsed) < 8: 
+        Q = Q0 * (seconds_elapsed/8.0)**4
+        # Filter very aggressively early: Q should be close to 0.
+    else:
+        Q = Q0
+    x = np.dot(F, x)
+    P = np.dot(np.dot(F, P), F.T) + Q
+    y = z - x
+    R = R0
+    if shot_pouring == False: # At the end of shot: progressively reduce the amount of filtering to 0.
+        seconds_after_end = time.time() - end_shot_time
+        if  seconds_after_end < 1.5:
+            R = R0 * (1.5 - seconds_after_end)/1.5
+        else:
+            R = R0 * 0.0
+    K = np.dot(P, np.linalg.inv(P + R))
+    x = x + np.dot(K, y)
+    P = P - np.dot((np.eye(2) - K), P)
+    filtered_weight = x[0]
+    filtered_flow = x[1]
+
 
 def save_temperature_logs():
     filename = "/home/pi/logs/log_temp" + time.strftime('%Y-%b-%d-%H%M') + ".json"  
