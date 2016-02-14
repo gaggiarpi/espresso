@@ -24,7 +24,7 @@ from collections import deque
 # Remember that the PiTFT display uses the following GPIO pins: all the hardware SPI pins (SCK, MOSI, MISO, CE0, CE1), and GPIO 24 and 25.
 # The 4 microswitches on the side of the display use: GPIO 17, 22, 23, 27 (from top to bottom)
 
-sys.stdout = open('/home/pi/stdout.txt', 'w', 0)
+# sys.stdout = open('/home/pi/stdout.txt', 'w', 0)
 # This redirects stdout to a file. 0 means no buffering. Each new line is redirected immediately.
 
 
@@ -127,9 +127,9 @@ pulse_sequence = [[0,0,0,0,0,0,0,0,0,0], # 0% power
                   [0,0,0,0,1,0,0,0,0,0], # 10%
                   [0,0,0,0,1,0,0,0,0,1], # 20%
                   [0,0,0,1,0,0,1,0,0,1], # 30%
-                  [1,0,0,1,0,0,1,0,0,1], # 40%
+                  [1,0,0,1,0,1,0,0,1,0], # 40%
                   [1,0,1,0,1,0,1,0,1,0], # 50%
-                  [0,1,1,0,1,1,0,1,1,0], # 60%
+                  [0,1,1,0,1,0,1,1,0,1], # 60%
                   [1,1,1,0,1,1,0,1,1,0], # 70%
                   [1,1,1,1,0,1,1,1,1,0], # 80%
                   [1,1,1,1,0,1,1,1,1,1], # 90%
@@ -334,7 +334,7 @@ def adjust_heating_power():
                 power = 0
         elif (steaming_on == False) and (post_shot == True):
             if (y[-1] > set_temp - 1) or (y[-1] - y[-2] < -0.125 and y[-2] - y[-3] < -0.125): # Wait until temperature goes back down and stabilizes somewhat before handing temp control back to the PID
-                power = 0
+                power = pid(y)
             # if y[-1] > set_temp + 1:
             #     power = pid(y)                  # Change this line to specify a post-shot heat power, if needed.
             else:
@@ -381,10 +381,10 @@ def read_pot():
     global pot_value
     while read_pot_on == True:
         old_pot_value = pot_value
-        pot_value = adc.readADCSingleEnded(3, 4096, 250)/3313.875 * 100
+        pot_value = adc.readADCSingleEnded(3, 4096, 250)/3313.0 * 100
         if abs(pot_value - old_pot_value) < 0.2: # To prevent oscillation, any change in pot value that is less than 2% will be discarded.
             pot_value = old_pot_value
-        time.sleep(.05)
+        time.sleep(.02)
     if read_pot_on == False:
         return
 
@@ -451,7 +451,7 @@ def pour_shot():
             if (int(pump_power) != previous_pump_power):
                 trigger_update_log_shot = True
                 last_adjust = seconds_elapsed
-        elif (seconds_elapsed > ramp_up_time) and (seconds_elapsed < 14) and (filtered_weight <= 4) :
+        elif (seconds_elapsed > ramp_up_time) and (seconds_elapsed < 11) and (filtered_weight <= 4) :
             # print "Case 2 - after ramp_up_time, but before 14 seconds, and weight < 4"
             pump_power = max_pump_power
             if (int(pump_power) != previous_pump_power) or (time.time()-last_log_time >= 1):
@@ -465,19 +465,16 @@ def pour_shot():
                     predicted_end_time = seconds_elapsed + (max_weight - filtered_weight) / flow_per_second 
                 else: # Should never be in this situation: weight was reported as > 4 grams, or we're after 14 seconds, but coffee is not flowing. 
                     predicted_end_time = 100  # The solution: force a pump power increase by reporting a long predicted time.
-            
                 if (predicted_end_time > time_too_long):
                     pump_power += 1
                 elif (predicted_end_time > time_way_too_short) and (predicted_end_time < time_too_short):
                     pump_power -= 1
                 elif (predicted_end_time <= time_way_too_short):
                      pump_power -= 2
-
                 if pump_power < 1:
                     pump_power = 1
                 if pump_power > 10:
                     pump_power = 10
-                
                 last_adjust = seconds_elapsed
                 trigger_update_log_shot = True
                 # print "At %0.1f sec, weight = %0.1f, flow = %0.2f g/s, predicted end time = %0.1f, pump_power = %s" %(seconds_elapsed,filtered_weight, flow_per_second, predicted_end_time, pump_power)
@@ -891,7 +888,7 @@ def sd(x):
     return ((math.fsum(sqdev))/(len(x)-1))**.5
 
 def tare_and_preheat():
-    global tare_weight, prev_weight, voltsdiff, filter_on
+    global tare_weight, prev_weight, voltsdiff, filter_on, filtered_weight
     lcd.fill(col_background, rect = area_text_temp)
     text = "Preheat"
     for i in range(1, 4):
@@ -902,18 +899,24 @@ def tare_and_preheat():
     prev_weight = [0.0]*4
     filter_initialize()
     filter_on = True
+    filtered_weight = 0.0
+
+trigger_volts_convert = False
 
 def read_voltage():
     # Running in its own thread
-    global t1, voltsdiff
+    global t1, voltsdiff, trigger_volts_convert
     # Voltages are read 16 times per second
     while trigger_stop_scale == False:
-        t1 = time.time()
         try:
             voltsdiff.append(-adc.readADCDifferential01(adc_resolution, sps)/1000.0)
+            t1 = time.time()
+            # print "%s: read_voltage() appending voltsdiff" %(t1)
+            trigger_volts_convert = True
         except Exception as e:
             print e
             voltsdiff.append(voltsdiff[-1])
+            t1 = time.time()
         # print "append voltsdiff: t1 = %s" %t1
     if trigger_stop_scale == True:
         # print "read_voltage thread exited"
@@ -923,44 +926,49 @@ weighing_time = time.time()-1
 t1 = time.time()
 
 def convert_volts():
-    global current_weight, prev_weight, mva_voltsdiff, tare_weight, displayed_weight, weighing_time, previous_time
+    global current_weight, prev_weight, mva_voltsdiff, tare_weight, displayed_weight, weighing_time, previous_time, filtered_weight
     mva_voltsdiff = mean(voltsdiff)
     current_weight = scaling[0] + mva_voltsdiff*scaling[1] - tare_weight
     previous_time = weighing_time
     weighing_time = t1
-    # print "converting V into g: last voltsdiff: t1 = %s" %t1
-    displayed_weight = current_weight
-    filtered_weight = current_weight
+    # print "%s: converting V into g: last voltsdiff" %t1
     if filter_on == True:
         # print "filtering: previous_time %s; weighing_time %s" %(previous_time, weighing_time)
         filter(current_weight, prev_weight[0], weighing_time, previous_time, Q0, R0)
-        displayed_weight = filtered_weight
+        displayed_weight = filtered_weight if filtered_weight >= 0 else 0.001
+    elif filter_on == False:
+        filtered_weight = current_weight
+        displayed_weight = current_weight
     prev_weight = [current_weight, prev_weight[0], prev_weight[1], prev_weight[2]]
 
 def voltages_to_weight():
     # Conversion in grams every 10th of a second
-    global weight_series, weight_series_time
+    global weight_series, weight_series_time, trigger_volts_convert
     while trigger_stop_scale == False:
-        convert_volts()
-        lcd.fill(col_background, rect = area_text_temp)
-        display_text('{0:.1f}'.format(displayed_weight) + " g.", (5, 5), 60, col_text)
-        pygame.display.update(area_text_temp)
-        # sd_grams = sd(voltsdiff)*scaling[1]/(len(voltsdiff)**0.5)
-        weight_series_time.append(weighing_time - start_script_time)
-        weight_series.append(current_weight)
-        if filter_on == True:
-            filtered_time.append(weighing_time - start_script_time)
-            filtered_weight_series.append(filtered_weight)
-            filtered_flow_series.append(filtered_flow)
-        time.sleep(.1)
-        # print "w = %0.1f, sd = %0.4f" % (current_weight, sd_grams)
+        if trigger_volts_convert == True:
+            convert_volts()
+            weight_series_time.append(weighing_time - start_script_time)
+            weight_series.append(current_weight)
+            # print "%s: current_weight = %s" %(weighing_time, current_weight)
+            if filter_on == True:
+                filtered_time.append(weighing_time - start_script_time)
+                filtered_weight_series.append(filtered_weight)
+                filtered_flow_series.append(filtered_flow)
+                # print "%s: filtered_weight = %s" %(weighing_time, filtered_weight)
+            lcd.fill(col_background, rect = area_text_temp)
+            display_text('{0:.1f}'.format(displayed_weight) + " g.", (5, 5), 60, col_text)
+            pygame.display.update(area_text_temp)
+            trigger_volts_convert = False
+        elif trigger_volts_convert == False:
+            # print "Waiting for next trigger_volts_convert"
+            time.sleep(.01)
     if trigger_stop_scale == True:
         # print "voltage_to_weight thread exited"
         return
 
 def filter_initialize():
     global Q0, R0, x, P
-    Q0 =np.array([[0.08, 0.00], 
+    Q0 =np.array([[0.04, 0.00], 
                   [0.00, 0.08]])
     R0 = np.array([[2.0, -1.0],
                   [-1.0, 2.0]])
@@ -975,7 +983,7 @@ def filter(current_weight, prev_weight, time1, time0, Q0, R):
     F = np.array([[1.0, dt],
                   [0.0, 1.0]])
     if (seconds_elapsed) < 8: 
-        Q = Q0 * (seconds_elapsed/8.0)**4
+        Q = Q0 * (seconds_elapsed/8.0)**5
         # Filter very aggressively early: Q should be close to 0.
     else:
         Q = Q0
@@ -1011,7 +1019,8 @@ def shutdown():
     GPIO.cleanup()
     pygame.quit()
     display_brightness(10)
-    sys.exit()
+    os._exit(1)
+    # sys.exit()
     # os.system("sudo shutdown now")
     
 

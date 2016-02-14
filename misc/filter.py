@@ -24,7 +24,12 @@ def filter(current_weight, prev_weight, time, prev_time, seconds_elapsed, Q0, R)
     x = np.dot(F, x)
     P = np.dot(np.dot(F, P), F.T) + Q
     y = z - x
-    # Idea: revert to signal z at the end of shot, multiply R by smaller and small values: 1.00 to 0.00 during the first 1 or 2 seconds following the end of the shot. 
+    if shot_pulling == False: # At the end of shot: progressively reduce the amount of filtering to 0.
+        seconds_after_end = time.time() - end_shot_time
+        if  seconds_after_end < 1.5:
+            R = R * (1.5 - seconds_after_end)/1.5
+        else:
+            R = R * 0
     K = np.dot(P, np.linalg.inv(P + R))
     x = x + np.dot(K, y)
     P = P - np.dot((np.eye(2) - K), P)
