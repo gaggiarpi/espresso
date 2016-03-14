@@ -56,7 +56,7 @@ g1 <- ggplot() +
 		geom_segment(data = df[rows,], aes(x = time, y = weight, xend = predicted_end_time, yend = d$max_weight), col = "red", alpha = I(1/10), show.legend = FALSE) +
 		# geom_point(data = df[rows,], aes(x=time, y=weight), col = "red", alpha = I(1/10)) +
 		geom_line( data = dw, aes(x=time, y=weight)) + 
-		labs(title = paste(round(df$weight[nrow(df)],0), "g. in", round(d$end - d$start,0), "s."), y="Weight in grams", x= element_blank()) +
+		labs(title = paste(round(df$weight[nrow(df)],1), "g. in", round(d$end - d$start,1), "s."), y="Weight in grams", x= element_blank()) +
 		coord_cartesian(xlim = c(-.8,xmax), ylim = c(min(dw$weight)-.5, max(dw$weight) + 1)) +
 		annotate("segment", x=dw[which_i(5),]$time, y=dw[which_i(5),]$weight, xend=dw[which_i(5),]$time, yend=-10, linetype = 3) +
 		annotate("segment", x=dw[which_i(10),]$time, y=dw[which_i(10),]$weight, xend=dw[which_i(10),]$time, yend=-10, linetype = 3) +
@@ -68,10 +68,17 @@ g1 <- ggplot() +
 # Flow rate vs. Time      #
 ###########################
 
-g2 <- ggplot(df[rows,], aes(x = time, y=flow_per_second)) + 
-		geom_line(color = "red2") + geom_point(color = "red2") + 
+# g2 <- ggplot(df[rows,], aes(x = time, y=flow_per_second)) +
+# 		geom_line(color = "red2") + geom_point(color = "red2") +
+# 		labs(y="Flow rate", x = element_blank()) +
+# 		geom_vline(xintercept = d$end - d$start) +
+# 		coord_cartesian(xlim = c(-.8,xmax), ylim = c(-0.05, min(flow_max, 3.5))) +
+# 		theme(plot.margin = unit(c(0.5, 1, 0, 1), "lines"))
+
+g2 <- ggplot(data = dw[dw$weight > .5 & dw$time < d$end-d$start,]) +
+		geom_line(aes(x = time, y = flow), color = "red2") +
 		labs(y="Flow rate", x = element_blank()) +
-		geom_vline(xintercept = d$end - d$start) + 
+		geom_vline(xintercept = d$end - d$start) +
 		coord_cartesian(xlim = c(-.8,xmax), ylim = c(-0.05, min(flow_max, 3.5))) +
 		theme(plot.margin = unit(c(0.5, 1, 0, 1), "lines"))
 
@@ -79,16 +86,27 @@ g2 <- ggplot(df[rows,], aes(x = time, y=flow_per_second)) +
 # Predicted end vs. Time      #
 ###############################
 
-g3 <- ggplot(df[rows,], aes(x = time, y=predicted_end_time)) + 
+# g3 <- ggplot(df[rows,], aes(x = time, y=predicted_end_time)) +
+# 		geom_ribbon(aes(ymin = 0, ymax = t2, x = time), fill = "blue", alpha = I(.1))+
+# 		geom_ribbon(aes(ymin = t2, ymax = t1, x = time), fill = "yellow", alpha = I(.1))+
+# 		geom_ribbon(aes(ymin = t1, ymax = t0, x = time), fill = "green", alpha = I(.05))+
+# 		geom_ribbon(aes(ymin = t0, ymax = 100, x = time), fill = "red", alpha = I(.1))+
+# 		geom_line(color = "darkgreen") + geom_point(color = "darkgreen") +
+# 		labs(y="Predicted end time", x = element_blank()) +
+# 		geom_vline(xintercept = d$end - d$start) +
+# 		coord_cartesian(xlim = c(-.8, xmax), ylim = c(pred_min, pred_max)) +
+# 		theme(plot.margin = unit(c(0.5, 1, 0, 1), "lines"))
+
+g3 <- ggplot(df[rows,]) + geom_point(aes(x = time, y = predicted_end_time), color = "darkgreen") +
 		geom_ribbon(aes(ymin = 0, ymax = t2, x = time), fill = "blue", alpha = I(.1))+
 		geom_ribbon(aes(ymin = t2, ymax = t1, x = time), fill = "yellow", alpha = I(.1))+
 		geom_ribbon(aes(ymin = t1, ymax = t0, x = time), fill = "green", alpha = I(.05))+
 		geom_ribbon(aes(ymin = t0, ymax = 100, x = time), fill = "red", alpha = I(.1))+
-		geom_line(color = "darkgreen") + geom_point(color = "darkgreen") + 
 		labs(y="Predicted end time", x = element_blank()) + 
 		geom_vline(xintercept = d$end - d$start) + 
 		coord_cartesian(xlim = c(-.8, xmax), ylim = c(pred_min, pred_max)) +
-		theme(plot.margin = unit(c(0.5, 1, 0, 1), "lines"))
+		geom_line(data = dw[dw$weight > .5 & dw$time < d$end-d$start & dw$flow > 0,], aes(x = time, y = time + (d$max_weight-weight)/flow), color = "darkgreen") + 
+		theme(plot.margin = unit(c(0.5, 1, 0, 1), "lines")) 
 
 ###########################
 # Pump power vs. Time     #

@@ -24,7 +24,7 @@ from collections import deque
 # Remember that the PiTFT display uses the following GPIO pins: all the hardware SPI pins (SCK, MOSI, MISO, CE0, CE1), and GPIO 24 and 25.
 # The 4 microswitches on the side of the display use: GPIO 17, 22, 23, 27 (from top to bottom)
 
-# sys.stdout = open('/home/pi/stdout.txt', 'w', 0)
+sys.stdout = open('/home/pi/stdout.txt', 'w', 0)
 # This redirects stdout to a file. 0 means no buffering. Each new line is redirected immediately.
 
 
@@ -108,14 +108,14 @@ GPIO.output(heat_pin, 0)
 ADS1115 = 0x01	# 16-bit ADC
 adc = ADS1x15(ic=ADS1115)
 
-sps = 16 # sps can be 8, 16, 32, 64, 128, 250, 475, 860
-sensitivity_factor = 2 # The sensitivity factor determines the length of the voltsdiff list, on which the moving average is computed: the longer the list, the less sensitive the measurement. A sensitivity factor of 4 means that the moving average is run on the voltages measured in the last one fourth of a second.
+sps = 8 # sps can be 8, 16, 32, 64, 128, 250, 475, 860
+len_voltsdiff = 3 
 adc_resolution = 2048
 scaling = [-287.35410, 430.74201]
 
 # print "Scale resolution = %0.4f grams" %(round(adc_resolution,0)/(2**15)*scaling[1]/1000.0)
 
-voltsdiff=deque([-adc.readADCDifferential01(adc_resolution, sps)/1000.0]*int(sps/sensitivity_factor), int(sps/sensitivity_factor))
+voltsdiff=deque([-adc.readADCDifferential01(adc_resolution, sps)/1000.0]*len_voltsdiff, len_voltsdiff)
 tare_weight = 0.0
 prev_weight = [0.0]*4
 mva_voltsdiff = 0.0
@@ -192,10 +192,6 @@ post_shot = False
 pot_value = 0
 read_pot_on = False
 
-max_pump_power = 7.0
-ramp_up_time = 10.0
-
-
 last_timer = 0
 last_weight = 0
 
@@ -215,14 +211,25 @@ old_backflush_on = False
 flush_on = False
 old_flush_on = False
 
-shot_temp = 92
-steam_temp = 92
-set_temp = shot_temp
+shot_temp = 91
+steam_temp = 91
+
+try:
+    settings = json.load(open("/home/pi/settings.txt","r"))
+    set_temp = settings["set_temp"]
+    max_weight = settings["max_weight"]
+    ramp_up_time = settings["ramp_up_time"]
+    max_pump_power = settings["max_pump_power"]
+except IOError:
+    set_temp = shot_temp
+    max_weight = 34.0
+    max_pump_power = 7.0
+    ramp_up_time = 10.0
+
 old_set_temp = 0
 power = 0
 pump_power = 0 
 preinf = True
-max_weight = 34.0
 
 submenu = 0
 m_item_selected = 0
@@ -429,15 +436,17 @@ def pour_shot():
     time.sleep(time_preheat+.5)
     last_adjust = 0.0
     previous_pump_power = 0
+    dt = 1.5 
+    deriv_gain = 3.0
     while shot_pouring == True:
         current_time = time.time() - start_script_time
-        # time_too_long      = interpolate(seconds_elapsed, (10,50), (25,36))
-        time_too_long      = interpolate(seconds_elapsed, (10,80), (27,36))
-        time_too_short     = interpolate(seconds_elapsed, (10,40), (25,33))
-        time_way_too_short = interpolate(seconds_elapsed, (10,35), (25,30))
+        # time_too_long      = interpolate(seconds_elapsed, (10,90), (25,36))
+        time_too_long      = interpolate(seconds_elapsed, (10,90), (25,33))
+        time_too_short     = interpolate(seconds_elapsed, (10,40), (25,30))
+        time_way_too_short = interpolate(seconds_elapsed, (10,35), (25,27))
         
         # Simple case: no ramp_up_time. Just apply full power 
-        if (ramp_up_time == 0) and (filtered_weight <= 4):
+        if (ramp_up_time == 0) and (filtered_weight <= 2):
             # print "Case 0 - no ramp_up_time"
             pump_power = max_pump_power
             if (seconds_elapsed - last_adjust >= 1):
@@ -445,36 +454,44 @@ def pour_shot():
                 trigger_update_log_shot = True
         # First stage of the shot: pump power ramps up to max_pump power over ramp up time and stays there for another 4 seconds.
         # But that's only if weight <= 4 grams. If it's more than 4 grams, pump_power is set according to the rules for Stage 2 of the shot
-        elif (seconds_elapsed <= ramp_up_time) and (filtered_weight <= 4):
+        elif (seconds_elapsed <= ramp_up_time) and (filtered_weight <= 2):
             # print "Case 1 - ramping up until 4g"
             pump_power = seconds_elapsed/ramp_up_time * (max_pump_power - 1) + 1 # increase pump power continuously during ramp_up_time.
             if (int(pump_power) != previous_pump_power):
                 trigger_update_log_shot = True
                 last_adjust = seconds_elapsed
-        elif (seconds_elapsed > ramp_up_time) and (seconds_elapsed < 11) and (filtered_weight <= 4) :
+        elif (seconds_elapsed > ramp_up_time) and (seconds_elapsed < 11) and (filtered_weight <= 2) :
             # print "Case 2 - after ramp_up_time, but before 14 seconds, and weight < 4"
             pump_power = max_pump_power
             if (int(pump_power) != previous_pump_power) or (time.time()-last_log_time >= 1):
                 trigger_update_log_shot = True
-        # Second stage of the shot: after 14 seconds, or if weight is at least 4 seconds, adjust pump power every second by evaluating the flow:
+        # Second stage of the shot: after 11 seconds, or if weight is at least 2 grams, adjust pump power every second by evaluating the flow:
         else:
-            # print "Case 4 - all other: seconds_elapsed = %s, last_adjust = %s " %(seconds_elapsed, last_adjust)
-            if (seconds_elapsed - last_adjust >= 1):
-                flow_per_second = filtered_flow
+            if (seconds_elapsed - last_adjust >= dt):
+                flow_per_second = flow_smooth
+                deriv_gain0 = min(max(33.0 - seconds_elapsed, 0), deriv_gain)
                 if (flow_per_second > 0):
-                    predicted_end_time = seconds_elapsed + (max_weight - filtered_weight) / flow_per_second 
+                    predicted_end_time = seconds_elapsed + (max_weight - filtered_weight) / flow_per_second
+                    try: 
+                        old_predicted_end_time 
+                    except NameError:
+                        old_predicted_end_time = predicted_end_time
+                    change_predicted_end_time = predicted_end_time - old_predicted_end_time
                 else: # Should never be in this situation: weight was reported as > 4 grams, or we're after 14 seconds, but coffee is not flowing. 
                     predicted_end_time = 100  # The solution: force a pump power increase by reporting a long predicted time.
-                if (predicted_end_time > time_too_long):
+                    old_predicted_end_time = 100
+                    change_predicted_end_time = 0
+                if (predicted_end_time + deriv_gain0 * change_predicted_end_time/dt > time_too_long):
                     pump_power += 1
-                elif (predicted_end_time > time_way_too_short) and (predicted_end_time < time_too_short):
+                elif (predicted_end_time + deriv_gain0 * change_predicted_end_time/dt> time_way_too_short) and (predicted_end_time + deriv_gain0 * change_predicted_end_time/dt < time_too_short):
                     pump_power -= 1
-                elif (predicted_end_time <= time_way_too_short):
+                elif (predicted_end_time + deriv_gain0 * change_predicted_end_time/dt <= time_way_too_short):
                      pump_power -= 2
                 if pump_power < 1:
                     pump_power = 1
                 if pump_power > 10:
                     pump_power = 10
+                old_predicted_end_time = predicted_end_time
                 last_adjust = seconds_elapsed
                 trigger_update_log_shot = True
                 # print "At %0.1f sec, weight = %0.1f, flow = %0.2f g/s, predicted end time = %0.1f, pump_power = %s" %(seconds_elapsed,filtered_weight, flow_per_second, predicted_end_time, pump_power)
@@ -953,7 +970,7 @@ def voltages_to_weight():
             if filter_on == True:
                 filtered_time.append(weighing_time - start_script_time)
                 filtered_weight_series.append(filtered_weight)
-                filtered_flow_series.append(filtered_flow)
+                filtered_flow_series.append(flow_smooth)
                 # print "%s: filtered_weight = %s" %(weighing_time, filtered_weight)
             lcd.fill(col_background, rect = area_text_temp)
             display_text('{0:.1f}'.format(displayed_weight) + " g.", (5, 5), 60, col_text)
@@ -976,8 +993,11 @@ def filter_initialize():
     P = np.array([[0.0, 0.0],
                   [0.0, 0.0]])
 
+flow_list6 = deque([0], 6)
+flow_smooth = 0
+
 def filter(current_weight, prev_weight, time1, time0, Q0, R):
-    global x, P, filtered_weight, filtered_flow
+    global x, P, filtered_weight, filtered_flow, flow_list5, flow_smooth
     dt = time1 - time0
     z = [current_weight, (current_weight-prev_weight)/dt] 
     F = np.array([[1.0, dt],
@@ -1002,6 +1022,8 @@ def filter(current_weight, prev_weight, time1, time0, Q0, R):
     P = P - np.dot((np.eye(2) - K), P)
     filtered_weight = x[0]
     filtered_flow = x[1]
+    flow_list6.append(filtered_flow)
+    flow_smooth = mean(flow_list6)
 
 
 def save_temperature_logs():
@@ -1015,13 +1037,17 @@ def save_temperature_logs():
 def shutdown():
     # Save data in json file (y, heat_series,)
     # Save settings (temperature, preinfusion, etc.) in another json file to be loaded later on.
-    save_temperature_logs()
+    # save_temperature_logs()
     GPIO.cleanup()
+    json.dump({"set_temp": set_temp, 
+               "max_weight": max_weight, 
+               "ramp_up_time": ramp_up_time, 
+               "max_pump_power": max_pump_power}, open("/home/pi/settings.txt", "w"))
     pygame.quit()
     display_brightness(10)
-    os._exit(1)
+    # os._exit(1)
     # sys.exit()
-    # os.system("sudo shutdown now")
+    os.system("sudo shutdown now")
     
 
 ##################################################################
@@ -1357,10 +1383,10 @@ thread.start_new_thread(thread_refresh_buttons, ())
 thread.start_new_thread(thread_auto_dim_or_shutdown, ())
 # thread.start_new_thread(adjust_pid, ())
 
-GPIO.add_event_detect(button1_pin, GPIO.FALLING, callback=button1, bouncetime = 500)
-GPIO.add_event_detect(button2_pin, GPIO.FALLING, callback=button2, bouncetime = 500)
-GPIO.add_event_detect(button3_pin, GPIO.FALLING, callback=button3, bouncetime = 500)
-GPIO.add_event_detect(button4_pin, GPIO.FALLING, callback=button4, bouncetime = 500)
+GPIO.add_event_detect(button1_pin, GPIO.FALLING, callback=button1, bouncetime = 100)
+GPIO.add_event_detect(button2_pin, GPIO.FALLING, callback=button2, bouncetime = 100)
+GPIO.add_event_detect(button3_pin, GPIO.FALLING, callback=button3, bouncetime = 100)
+GPIO.add_event_detect(button4_pin, GPIO.FALLING, callback=button4, bouncetime = 100)
 
 os.system("gpio -g mode 18 pwm")
 os.system("gpio pwmc 1000")
