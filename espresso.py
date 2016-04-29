@@ -24,7 +24,9 @@ from collections import deque
 # Remember that the PiTFT display uses the following GPIO pins: all the hardware SPI pins (SCK, MOSI, MISO, CE0, CE1), and GPIO 24 and 25.
 # The 4 microswitches on the side of the display use: GPIO 17, 22, 23, 27 (from top to bottom)
 
-sys.stdout = open('/home/pi/stdout.txt', 'w', 0)
+sys.stdout = open("/home/pi/logs/stdout-" + time.strftime('%Y-%m-%d-%H%M') + ".txt", 'w')
+
+# sys.stdout = open("/home/pi/logs/stdout-" + time.strftime('%Y-%m-%d-%H%M') + ".txt", 'w', 0)
 # This redirects stdout to a file. 0 means no buffering. Each new line is redirected immediately.
 
 
@@ -81,7 +83,6 @@ def read_sensor():
         temp_string = lines[1][equals_pos+2:]
         temp_c = float(temp_string) / 1000.0
         return temp_c
-        
 
 
 
@@ -91,8 +92,7 @@ GPIO.setup(button1_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 GPIO.setup(button2_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 GPIO.setup(button3_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 GPIO.setup(button4_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-# I2C connection to load cell.
-# ADC connected to potentiometer
+
 
 # Setting the output pins:
 
@@ -103,10 +103,13 @@ GPIO.setup(heat_pin, GPIO.OUT)
 GPIO.output(pump_pin, 0)
 GPIO.output(heat_pin, 0)
 
-# ADC for scale voltage readings
+# I2C connection to ADC
+# ADC connected to potentiometer and load cell.
 
 ADS1115 = 0x01	# 16-bit ADC
 adc = ADS1x15(ic=ADS1115)
+
+# ADC for scale voltage readings
 
 sps = 8 # sps can be 8, 16, 32, 64, 128, 250, 475, 860
 len_voltsdiff = 3 
@@ -135,51 +138,9 @@ pulse_sequence = [[0,0,0,0,0,0,0,0,0,0], # 0% power
                   [1,1,1,1,0,1,1,1,1,1], # 90%
                   [1,1,1,1,1,1,1,1,1,1]] # 100% power
 
-# Closed-loop temperature control: PID parameters:
-
-kP = 0.07
-kI = 0.12
-kD = 3.50
-
-
 # Open-loop temperature control
 
 power_when_pulling_shot = 28
-
-# Remember: it's a 1,425 Watt boiler.
-# [1 joule = 0.2386634845 Cal
-# 1 mean calorie = 4.190 joule]
-#
-# In 1 second, the boiler produces 1425 Watts = 1425 joules = 340.1 calories of energy.
-#
-# 1 calorie = energy needed to heat 1 gram of water by 1 degree celsius:
-#
-# cal_needed = temp_delta_Celsius * water_mass_in_grams
-# cal_needed = (92C - 20C) * water_mass_in_grams
-# cal_needed = 72 * 36 = 2592
-#
-# 2592 calories can be produced by turning the boiler on for 2592/340.1 = 7.62 seconds.
-# If the shot takes 32 seconds, that's 7.62 / 32 = 24% of the power of the boiler.
-#
-# Assuming no loss: to heat up 36g of water over 32 seconds, from 20 to 92 degrees, the boiler needs 24% of its full power.
-# 
-# Note: more than 36g of water goes through the boiler for a 36g shot (wet puck + 3 way valve)
-# The formula steam_on should be:
-# percent_on = 72/340.1 * water/time = 0.211 * (water)/(heat_time + preheat_time)
-# where: water = shot_weight*91% + water_in_puck + water_through_3-way_valve (assuming 18% extraction, there's 9% tds in the cup for a 1:2 coffee/water ratio)
-#
-# Found that after a 36g shot, the portafilter was 22g heavier (nothing came out of the 3-way valve). 
-#
-# That's .211*(36*.9+22)/(25 + 3) = 40% power needed.
-#
-# This is an upper limit. A slightly declining intrashot temp profile might be desirable for recovery time between shots (and taste?)
-# Cooling down the boiler takes longer than heating it back up to set temperature
-
-# Time in seconds when the pump needs to stay idle before shot after button 4 is pressed, in order to tare the scale.
-#
-# Assuming water was at 20 degrees, and (36.9+22) of water was heated, and heat was on for 25+3.5 = 28.5 seconds.
-# with this amount of calories: cold water could be heated up to 20+(28.5*.4*340)/(36*0.9+22) about 91 degrees.
-# Note: the boiler capacity is about 100g. 
 
 time_preheat = 3
 
@@ -211,25 +172,45 @@ old_backflush_on = False
 flush_on = False
 old_flush_on = False
 
-shot_temp = 91
-steam_temp = 91
+def load_settings():
+    global set_temp, target_weight, ramp_up_time, pp0, pp1, pp2, kP, kI, kD, k0
+    try:
+        settings = json.load(open("/home/pi/settings.txt","r"))
+        set_temp = settings["set_temp"]
+        target_weight = settings["target_weight"]
+        ramp_up_time = settings["ramp_up_time"]
+        pp0 = settings["pp0"]
+        pp1 = settings["pp1"]
+        pp2 = settings["pp2"]
+        kP = settings["kP"]
+        kI = settings["kI"]
+        kD = settings["kD"]
+        k0 = settings["k0"]
+    except:
+        reset_settings()
 
-try:
-    settings = json.load(open("/home/pi/settings.txt","r"))
-    set_temp = settings["set_temp"]
-    max_weight = settings["max_weight"]
-    ramp_up_time = settings["ramp_up_time"]
-    max_pump_power = settings["max_pump_power"]
-except IOError:
-    set_temp = shot_temp
-    max_weight = 34.0
-    max_pump_power = 7.0
-    ramp_up_time = 10.0
+def reset_settings():
+    global set_temp, target_weight, ramp_up_time, pp0, pp1, pp2, kP, kI, kD, k0
+    set_temp = 90
+    target_weight = 36
+    ramp_up_time = 10
+    pp0 = 1.0
+    pp1 = 7.0
+    pp2 = 7.0
+    kP = 0.07
+    kI = 0.12
+    kD = 3.50
+    k0 = 0.00
+    # Or these values seem quite good: {"kI": 0.12, "pp2": 7.0, "pp1": 7.0, "target_weight": 36, "k0": 0.035, "kD": 2.499999999999999, "ramp_up_time": 10, "pp0": 3.0, "set_temp": 90, "kP": 0.07}
+
+load_settings()
+
+shot_temp = set_temp
+steam_temp = 90.0
 
 old_set_temp = 0
 power = 0
 pump_power = 0 
-preinf = True
 
 submenu = 0
 m_item_selected = 0
@@ -239,15 +220,16 @@ m_item_selected = 0
 
 temp0 = read_sensor()
 y = deque([temp0, temp0, temp0], 3600) 
+y_time = deque([0,0,0], 3600)
+
 heat_series = deque([0,0,0], 3600)
 shot_series = deque([False, False, False], 3600)
+
 weight_series = []
+weight_series_time = []
 filtered_weight_series = []
 filtered_flow_series = []
 filtered_time = []
-
-y_time = deque([0,0,0], 3600)
-weight_series_time = []
 
 
 # With a refresh speed of 0.5 seconds, 3600 data points = 30 minutes of temperature logging. Perhaps overkill.
@@ -263,7 +245,7 @@ filter_on = False
 ####################################
 
 # Screen resolution is 320 * 240.
-# Careful here: pygame.Rect uses does not use coordinates for rectangles: (left, top, width, height)
+# Careful here: pygame.Rect uses these coordinates for rectangles: (left, top, width, height) [not (left, top, right, bottom)]
 area_graph = ((0,65),(280,155))
 # This is the reduced-size graph window, used when pulling a shot or entering the settings menu.
 # area_graph = ((0,100),(140,100)) # Note that we need to change npixels_per_tempreading
@@ -285,40 +267,35 @@ npixels_per_tempreading = 2
 # Functions defining actions triggered by buttons (e.g. pour_shot) or automatically (e.g. heat) #
 #################################################################################################
 
+length_history = len(y)
+
 def read_temp():
-    # global y
-    # global y, trigger_refresh_temp_display, trigger_adjust_heating
+    global length_history
     current_temp_reading = read_sensor()
     y.append(current_temp_reading)
     y_time.append(time.time()-start_script_time)
-    # if current_temp_reading < y[-1] - 5: # A drop of more than 5 degrees between readings is clearly an error.
-    #     print "Implausible reading (" + str(current_temp_reading) + ") replaced by previous value of (" + str(y[-1])+")"
-    #     current_temp_reading = y[-1]
+    if length_history < 60:
+        # This variable will be used to adjust how far back the integral term should go in the PID.
+        length_history += 1
     
-def pid(y):
+def pid(y, set_temp):
     # P: how far from the set_temp is y?
     P = set_temp - y[-1]
-    # I: how far from the set_temp has y been on average over the last 60*.80 = 48 seconds?
-    # I = sum(set_temp - y[-i] for i in xrange(1, len(y)))
-    I = sum(set_temp - y[-i] for i in xrange(1, min(len(y), 60)))/min(len(y), 60)
-    # Make sure values of I stay between 0 and 1, or they will have too much weight on the final value returned by the PID(?)
+    # I: Mean error over the last 60 measurements (60*.80 = 48 second)
+    I = 1/length_history * sum(set_temp - y[-i] for i in xrange(1, length_history))
+    # Avoid integral windup:
     if I > 1:
         I = 1
     elif I < -1:
         I = -1
-    # D: how has y evolved over the last 2 seconds (4 readings)?
-    if len(y) < 2:
+    # D: how has y evolved over the last 4 readings?
+    if len(y) < 4:
         D = 0
-    elif len(y) >= 2:
+    else:
         D = y[-2] - y[-1]
-        # D = (y[-4] + y[-3])/2 - (y[-2] + y[-1])/2
-    # Make sure that power only takes even percentage values -- because the duty cycle is .50 sec = 25 A/C waves = 50 half waves.
-    # SSR time on can be adjusted in 1/50 = 2% increments
-    # if (abs(P) <= .3) and (abs(D) <= .3): # use a refined function when temp is close to set point and nearly stable. PID says power should be 0 at equilibrium, but that's clearly wrong. The system will always cool down, and some power will always need to be applied.
-    #     power = random.choice([2, 4]) # on average power close to equilibrium should be 3%.
-    # else:
-    #     power = int(round((kP*P + kI*I + kD*D)*50))*2
-    power = round((kP*P + kI*I + kD*D)*100)
+        # D = ((y[-4] + y[-3])/2 - (y[-2] + y[-1])/2)/2
+    power = (k0 + kP*P + kI*I + kD*D)*100
+    # Could also try adding a 2% intercept = the expected amount of power needed to keep temperature from dropping once steady-state is reached
     # We can't go above 100% and below 0% heat.
     if power > 100:
         power = 100
@@ -330,27 +307,36 @@ def pid(y):
 
 
 def adjust_heating_power():
-    global power, post_shot
+    global power, post_shot, length_history
+    if heat_cycles < 3.5*60/0.79 and start_temp < 50:
+        early_boost = 100 - set_temp # For the first 3.5 minutes, if the machine starts cold, set_temp will be boosted up to 100 degrees. The machine will warm up faster to set_temp.
+    else:
+        early_boost = 0
     if shot_pouring == False:
         if (steaming_on == False) and (post_shot == False): 
-            if (y[-1] > .90 * set_temp) and (y[-1] < 100):
-                power = pid(y)
-            elif (y[-1] <= .90 * set_temp):
+            if (y[-1] > .90 * (set_temp + early_boost)) and (y[-1] < 105):
+            #     if abs(y[-1] - set_temp) <= .5 and y[-1] <= y[-4] + .25  :  # Temp is close to set point and either dropping or increasing very slowly.
+            #         power = max(2, pid(y, set_temp + early_boost)) # Power on will always be at least 2%.
+            #     else:
+                power = pid(y, set_temp + early_boost)
+            elif (y[-1] <= .90 * (set_temp + early_boost)):
                 power = 100
-            elif (y[-1] >= 100):
+            elif (y[-1] >= 105):
                 power = 0
         elif (steaming_on == False) and (post_shot == True):
-            if (y[-1] > set_temp - 1) or (y[-1] - y[-2] < -0.125 and y[-2] - y[-3] < -0.125): # Wait until temperature goes back down and stabilizes somewhat before handing temp control back to the PID
-                power = pid(y)
-            # if y[-1] > set_temp + 1:
-            #     power = pid(y)                  # Change this line to specify a post-shot heat power, if needed.
+            if (y[-1] > set_temp) and (time.time() - end_shot_time < 40) and (y[-1] < 98): # Wait until temperature goes back down and stabilizes somewhat before handing temp control back to the PID
+                if y[-1] < y[-2]:
+                    power = 16
+                else:
+                    power = 0
             else:
-                power = pid(y)
+                length_history = 2 # Resetting length_history to avoid confusing the PID (integral term) with high post shot temperature values
+                power = pid(y, set_temp + early_boost)
                 post_shot = False 
         elif steaming_on == True:
             if y[-1] < set_temp:
                 power = 100
-            if y[-1] >= set_temp:
+            else:
                 power = 0
     elif shot_pouring == True:
         if (y[-1] >= 105):
@@ -364,8 +350,10 @@ def adjust_heating_power():
     heat_series.append(power)
     shot_series.append(shot_pouring)
     
+heat_cycles = 0
 
 def output_heat():
+    global heat_cycles
     if power > 0:
         GPIO.output(heat_pin, True)
         time.sleep(.79 * power/100) # remember that the conversion speed of the temperature sensor is always > .82 second. read_temp() and output_heat() work in 2 different threads; they shouldn't get out of sync. output_heat() is called each time a new temperature reading has been made; and the last output_heat() should always end before a new reading becomes available...
@@ -373,35 +361,92 @@ def output_heat():
         GPIO.output(heat_pin, False)
         time.sleep(.79 * (100-power)/100)
     GPIO.output(heat_pin, False)
+    if heat_cycles <= 3.5*60/0.79 + 1: 
+        heat_cycles += 1
 
-def output_pump(pump_power):
-    if pump_power < 0 or pump_power > 10:
-        print "Error, choose pump_power between 0 and 10"
-    else:
-        pulses = pulse_sequence[pump_power] # Is this necessary? Should only reset pulses if pump_power changes
-        for i in range(0, 10):
-            GPIO.output(pump_pin, pulses[i])
-            time.sleep(.02) # wait 20 ms between pulses; could increase this to .04 to make it easier on the relay and the pump...
+# def output_pump(pump_power):
+#     if pump_power < 0 or pump_power > 10:
+#         print "Error, choose pump_power between 0 and 10"
+#     else:
+#         pulses = pulse_sequence[pump_power] # Is this necessary? Should only reset pulses if pump_power changes
+#         for i in range(0, 10):
+#             GPIO.output(pump_pin, pulses[i])
+#             time.sleep(.02) # wait 20 ms between pulses; could increase this to .04 to make it easier on the relay and the pump...
 
+# Another solution: start a new thread:
+#               thread.start_new_thread(output_pump, ()) 
+# inside pour_shot() and flush(). 
+# Make sure that there's a time.sleep(.125) in pour_shot() and in flush().
+#
+
+def output_pump():
+    i = 0
+    previous_pump_power = 0
+    pulses = [0]*10
+    while pump_power >= 0 and pump_power <= 10 and (flush_on == True or shot_pouring == True):
+        if pump_power != previous_pump_power:
+            pulses = pulse_sequence[pump_power]
+            previous_pump_power = pump_power
+        if i == 10:
+            i = 0
+        GPIO.output(pump_pin, pulses[i])
+        time.sleep(.02)
+        i += 1
+    if pump_power <= 0 or pump_power > 10 or flush_on == False or shot_pouring == False:
+        GPIO.output(pump_pin, 0)
+        if pump_power < 0 or pump_power > 10:
+            print "Error, choose pump_power between 0 and 10"
+        return
+
+adc_singl3 = 0
+adc_diff01 = 0
+
+def read_adc():
+    # ADC measurements (scale and pot) have to be read sequentially; can't be done in 2 separate threads running concurrently, or output values will be wrong.
+    global adc_diff01, adc_singl3
+    while read_pot_on == True or trigger_stop_scale == False:
+        if trigger_stop_scale == False:
+            try:
+                adc_diff01 = adc.readADCDifferential01(adc_resolution, sps)
+            except Exception as e:
+                print e
+            read_voltage()
+        if read_pot_on == True:
+            try:
+                adc_singl3 = adc.readADCSingleEnded(3, 4096, 860)
+            except Exception as e:
+                print e
+            read_pot()
+            if trigger_stop_scale == False: # Give the loop a rest if we're only measuring the pot voltage (at a super high sampling rate already); but if we also need to measure the voltage differential from the scale (at a lower sampling rate, for more precision), skip this step...
+                time.sleep(.1)
+    if read_pot_on == False and trigger_stop_scale == True:
+        return
+
+trigger_volts_convert = False
+
+def read_voltage():
+    # Running in its own thread
+    global t1, voltsdiff, trigger_volts_convert
+    # Voltages are read 16 times per second
+    voltsdiff.append(-adc_diff01/1000.0)
+    t1 = time.time()
+    trigger_volts_convert = True
+    # Let the volts-gram conversion and all the filtering happen in another thread.
 
 def read_pot():
     global pot_value
-    while read_pot_on == True:
-        old_pot_value = pot_value
-        pot_value = adc.readADCSingleEnded(3, 4096, 250)/3313.0 * 100
-        if abs(pot_value - old_pot_value) < 0.2: # To prevent oscillation, any change in pot value that is less than 2% will be discarded.
-            pot_value = old_pot_value
-        time.sleep(.02)
-    if read_pot_on == False:
-        return
+    old_pot_value = pot_value
+    pot_value = adc_singl3/3313.0 * 100
+    if abs(pot_value - old_pot_value) < 2: # To prevent oscillation, any change in pot value that is less than 2% will be discarded.
+        pot_value = old_pot_value
 
 def flush():
     global read_pot_on, pump_power
+    thread.start_new_thread(output_pump, ())
     read_pot_on = True
-    thread.start_new_thread(read_pot, ())
     while flush_on == True:
         pump_power = int(round(pot_value / 10, 0))
-        output_pump(pump_power)
+        time.sleep(.1)
     if flush_on == False:
         read_pot_on = False
         GPIO.output(pump_pin, 0)
@@ -427,95 +472,128 @@ def interpolate(x, point1, point2):
         y_value = y1
     return y_value
 
+def cut(x, breakpoints):
+    n = len(breakpoints)
+    if x < breakpoints[0]:
+        return 0
+    for i in range(1, n):
+        if breakpoints[i-1] <= x < breakpoints[i]:
+            return i
+    if x >= breakpoints[n-1]:
+        return n
+
+def auto_adjust_pump(predicted_end_time, change_predicted_end_time, seconds_elapsed):
+    deriv_gain = 3.0
+    deriv_gain0 = min(max(33.0 - seconds_elapsed, 0), deriv_gain)
+    breakpoints_now = [interpolate(seconds_elapsed, (10,35), (25,27)), 
+                       interpolate(seconds_elapsed, (10,40), (25,30)), 
+                       interpolate(seconds_elapsed, (10,70), (25,33))]
+    breakpoints_future =  [interpolate(seconds_elapsed + deriv_gain0, (10,35), (25,27)), 
+                           interpolate(seconds_elapsed + deriv_gain0, (10,40), (25,30)), 
+                           interpolate(seconds_elapsed + deriv_gain0, (10,70), (25,33))]
+    a = 3 - cut(predicted_end_time, breakpoints_now)
+    b = 3 - cut(predicted_end_time + deriv_gain0*change_predicted_end_time/dt, breakpoints_future)
+    # Look up table of pump actions: pump_action[row][column] = pump_action[a][b]
+    #    b is: Too long, OK, Too short, Way too short 
+    #                                                   a is:
+    pump_action = [[  2,  1,        1,            0], # Too long
+                   [  1,  0,       -1,           -1], # OK
+                   [  0, -1,       -1,           -2], # Too short
+                   [ -1, -2,       -2,           -3]] # Way too short
+    return pump_action[a][b]
+
+
+flow_mode = "Auto"
 
 def pour_shot():
     # This function will be run in its own thread
     print "pour_shot thread started"
     # Remember to open the 3-way valve here.
-    global pump_power, shot_pouring, end_shot_time, trigger_update_log_shot, flow_per_second, predicted_end_time, time_too_long, time_too_short, time_way_too_short, current_time
+    global pump_power, shot_pouring, end_shot_time, trigger_update_log_shot, flow_per_second, predicted_end_time, current_time, dt, read_pot_on
+    if flow_mode == "Manual":
+        read_pot_on = True
+        thread.start_new_thread(read_pot, ())
     time.sleep(time_preheat+.5)
     last_adjust = 0.0
+    pump_power = 0
     previous_pump_power = 0
     dt = 1.5 
-    deriv_gain = 3.0
+    thread.start_new_thread(output_pump, ()) 
     while shot_pouring == True:
         current_time = time.time() - start_script_time
-        # time_too_long      = interpolate(seconds_elapsed, (10,90), (25,36))
-        time_too_long      = interpolate(seconds_elapsed, (10,90), (25,33))
-        time_too_short     = interpolate(seconds_elapsed, (10,40), (25,30))
-        time_way_too_short = interpolate(seconds_elapsed, (10,35), (25,27))
         
-        # Simple case: no ramp_up_time. Just apply full power 
-        if (ramp_up_time == 0) and (filtered_weight <= 2):
-            # print "Case 0 - no ramp_up_time"
-            pump_power = max_pump_power
-            if (seconds_elapsed - last_adjust >= 1):
-                last_adjust = seconds_elapsed
-                trigger_update_log_shot = True
-        # First stage of the shot: pump power ramps up to max_pump power over ramp up time and stays there for another 4 seconds.
-        # But that's only if weight <= 4 grams. If it's more than 4 grams, pump_power is set according to the rules for Stage 2 of the shot
-        elif (seconds_elapsed <= ramp_up_time) and (filtered_weight <= 2):
-            # print "Case 1 - ramping up until 4g"
-            pump_power = seconds_elapsed/ramp_up_time * (max_pump_power - 1) + 1 # increase pump power continuously during ramp_up_time.
-            if (int(pump_power) != previous_pump_power):
-                trigger_update_log_shot = True
-                last_adjust = seconds_elapsed
-        elif (seconds_elapsed > ramp_up_time) and (seconds_elapsed < 11) and (filtered_weight <= 2) :
-            # print "Case 2 - after ramp_up_time, but before 14 seconds, and weight < 4"
-            pump_power = max_pump_power
-            if (int(pump_power) != previous_pump_power) or (time.time()-last_log_time >= 1):
-                trigger_update_log_shot = True
-        # Second stage of the shot: after 11 seconds, or if weight is at least 2 grams, adjust pump power every second by evaluating the flow:
-        else:
-            if (seconds_elapsed - last_adjust >= dt):
-                flow_per_second = flow_smooth
-                deriv_gain0 = min(max(33.0 - seconds_elapsed, 0), deriv_gain)
-                if (flow_per_second > 0):
-                    predicted_end_time = seconds_elapsed + (max_weight - filtered_weight) / flow_per_second
-                    try: 
-                        old_predicted_end_time 
-                    except NameError:
-                        old_predicted_end_time = predicted_end_time
-                    change_predicted_end_time = predicted_end_time - old_predicted_end_time
-                else: # Should never be in this situation: weight was reported as > 4 grams, or we're after 14 seconds, but coffee is not flowing. 
-                    predicted_end_time = 100  # The solution: force a pump power increase by reporting a long predicted time.
-                    old_predicted_end_time = 100
-                    change_predicted_end_time = 0
-                if (predicted_end_time + deriv_gain0 * change_predicted_end_time/dt > time_too_long):
-                    pump_power += 1
-                elif (predicted_end_time + deriv_gain0 * change_predicted_end_time/dt> time_way_too_short) and (predicted_end_time + deriv_gain0 * change_predicted_end_time/dt < time_too_short):
-                    pump_power -= 1
-                elif (predicted_end_time + deriv_gain0 * change_predicted_end_time/dt <= time_way_too_short):
-                     pump_power -= 2
-                if pump_power < 1:
-                    pump_power = 1
-                if pump_power > 10:
-                    pump_power = 10
-                old_predicted_end_time = predicted_end_time
-                last_adjust = seconds_elapsed
-                trigger_update_log_shot = True
-                # print "At %0.1f sec, weight = %0.1f, flow = %0.2f g/s, predicted end time = %0.1f, pump_power = %s" %(seconds_elapsed,filtered_weight, flow_per_second, predicted_end_time, pump_power)
-                # Need to add a log_weight thread, to save this data in a file.
-                # Log every second, starting as soon as the timer starts, ending 5 seconds after the end of the shot
+        if flow_mode == "Auto":    
+            
+            # Simple case: no ramp_up_time. Just apply full power 
+            
+            if (ramp_up_time == 0) and (seconds_elapsed < 11) and (filtered_weight <= 2):
+                # print "Case 0 - no ramp_up_time"
+                pump_power = pp2
+                if (seconds_elapsed - last_adjust >= 1):
+                    last_adjust = seconds_elapsed
+                    trigger_update_log_shot = True
+                    
+            # First stage of the shot: pump power ramps up from pp0 to pp1 over ramp up time, then pressure goes up to pp2 and stays there.
+            # But only as long as weight <= 2 grams and time < 11 seconds. Otherwise, pump_power is set according to the rules for Stage 2 of the shot
+            
+            elif (seconds_elapsed <= ramp_up_time) and (filtered_weight <= 2):
+                # print "Case 1 - ramping up from pp0 to pp1 until 2g"
+                pump_power = seconds_elapsed/ramp_up_time * (pp1 - pp0) + pp0 # increase pump power continuously during ramp_up_time.
+                if (int(pump_power) != previous_pump_power):
+                    trigger_update_log_shot = True
+                    last_adjust = seconds_elapsed
+            elif (seconds_elapsed > ramp_up_time) and (seconds_elapsed < 11) and (filtered_weight <= 2) :
+                # print "Case 2 - after ramp_up_time, but before 11 seconds, and weight < 2"
+                pump_power = pp2
+                if (int(pump_power) != previous_pump_power) or (time.time()-last_log_time >= 1):
+                    trigger_update_log_shot = True
+            
+            # Second stage of the shot: after 11 seconds, or if weight reaches 2 grams (whichever comes first), adjust pump power every second by evaluating the flow:
+            
+            else:
+                if (seconds_elapsed - last_adjust >= dt):
+                    flow_per_second = flow_smooth
+                    if (flow_per_second > 0):
+                        predicted_end_time = seconds_elapsed + (target_weight - filtered_weight) / flow_per_second - 1.15
+                        try: 
+                            old_predicted_end_time 
+                        except NameError:
+                            old_predicted_end_time = predicted_end_time
+                        change_predicted_end_time = predicted_end_time - old_predicted_end_time
+                    else: # Should never be in this situation: weight was reported as > 2 grams, or we're after 11 seconds, but coffee is not flowing. 
+                        predicted_end_time = 100  # The solution: force a pump power increase by reporting a long predicted time.
+                        old_predicted_end_time = 100
+                        change_predicted_end_time = 0
+                    pump_power += auto_adjust_pump(predicted_end_time, change_predicted_end_time, seconds_elapsed)
+                    if pump_power < 1:
+                        pump_power = 1
+                    if pump_power > 10:
+                        pump_power = 10
+                    old_predicted_end_time = predicted_end_time
+                    last_adjust = seconds_elapsed
+                    trigger_update_log_shot = True
         
-        if filtered_weight > max_weight:
-            # Note that this could be better: instead of stopping at max_weight, recognize that weight keeps increasing for 0.6 seconds or so after the shot.
-            # if (filtered_weight > 32) and filtered_weight + 0.6*flow_per_second >= 36:
+        elif flow_mode == "Manual":
+            pump_power = int(round(pot_value / 10, 0))
+            if (seconds_elapsed - last_adjust >= 1) or (pump_power != previous_pump_power):
+                last_adjust = seconds_elapsed
+                trigger_update_log_shot = True
+                previous_pump_power = pump_power
+        if filtered_weight > target_weight - 1.15*flow_smooth: 
             end_shot()
             pump_power = 0
             flow_per_second = 0
             predicted_end_time = 0
-            time_too_long      = 0
-            time_too_short     = 0
-            time_way_too_short = 0
             last_adjust = 0
             trigger_update_log_shot = True
         pump_power = int(pump_power)
         previous_pump_power = pump_power
-        output_pump(pump_power)
+        # output_pump(pump_power)
+        time.sleep(.125)
     # Make sure that the thread can exit
     if shot_pouring == False:
         GPIO.output(pump_pin, 0)
+        read_pot_on = False
         # print "pour_shot thread exited"
         return
 
@@ -528,7 +606,7 @@ current_time = 0
 
 
 def update_log_shot():
-    global last_log_time, trigger_update_log_shot
+    global last_log_time, trigger_update_log_shot, weight_series, weight_series_time, filtered_weight_series, filtered_flow_series, filtered_time
     log_current_time = []
     log_current_weight = []
     log_filtered_weight = []
@@ -540,11 +618,14 @@ def update_log_shot():
     log_time_way_too_short = []
     log_start_shot_time = []
     
-    # Idea: record more parameters here: max_weight, ramp_up_time, max_power, temperature at the beginning of the shot, temperature at the end, power_when_pulling_shot, etc. These could be added to the text of the e-mail.
+    # Idea: record more parameters here: target_weight, ramp_up_time, max_power, temperature at the beginning of the shot, temperature at the end, power_when_pulling_shot, etc. These could be added to the text of the e-mail.
     
     last_log_time = 0
     trigger_update_log_shot = False
     while log_shot == True:
+        time_too_long      = interpolate(seconds_elapsed, (10,70), (25,33))
+        time_too_short     = interpolate(seconds_elapsed, (10,40), (25,30)) 
+        time_way_too_short = interpolate(seconds_elapsed, (10,35), (25,27))
         if (trigger_update_log_shot == True):
             log_current_time.append(current_time)
             log_current_weight.append(current_weight)
@@ -578,10 +659,16 @@ def update_log_shot():
                        "filtered_weight_series": list(filtered_weight_series),
                        "filtered_flow_series": list(filtered_flow_series),
                        "start": start,
-                       "max_weight": max_weight,
+                       "target_weight": target_weight,
                        "end": end}, open(filename, "w"))
-            os.system(str("sudo R --vanilla -f /home/pi/flow_analysis.R --args " + filename))
+            os.system(str("sudo R --silent --vanilla -f /home/pi/flow_analysis.R --args " + filename))
             # flow_analysis.R will generate graphs with ggplot, save them as pdf, and run send_email.py to send the pdf & json files as attachment
+        # To clean up (but once everything has been dumped into the json file), empty the _series lists so that old values don't get dumped again for the next shot. 
+        weight_series = []
+        weight_series_time = []
+        filtered_weight_series = []
+        filtered_flow_series = []
+        filtered_time = []
         return
 
 def counting_seconds():
@@ -603,12 +690,12 @@ def counting_seconds():
 
 def end_shot():
     global end_shot_time, shot_pouring, pump_power, post_shot
+    end_shot_time = time.time()
     shot_pouring = False
     pump_power = 0
     GPIO.output(pump_pin, 0)
     post_shot = True
     # Remember to close the 3-way valve here.
-    end_shot_time = time.time()
     thread.start_new_thread(wait_after_shot_and_refresh, ())
 
 def wait_after_shot_and_refresh():
@@ -618,7 +705,7 @@ def wait_after_shot_and_refresh():
             current_time = time.time() - start_script_time
             trigger_update_log_shot = True
         time.sleep(.02)
-    if time.time() - end_shot_time >= 6:
+    if time.time() - end_shot_time >= 5:
         reset_graph_area(menu, shot_pouring)
         lcd.fill(col_background, area_timer)
         pygame.display.update(area_timer)
@@ -736,16 +823,30 @@ def draw_belowgraph():
         string = string + "  -  Steam"
     if steaming_on == False:
         # Update the rest of the display only every 2 refreshes
-        if (j % 8 < 2): # 0-1
-            minutes = int((time.time() - start_script_time)/60)
-            string = string + "  -  On: %s min." %(minutes)
-        elif (j % 8 < 4): # 2-3
-            string = string + "  -  Stop: %s g." %(max_weight)
-        elif (j % 8 < 6): # 4-5
-            string = string + "  -  Preinf: %ss." %(ramp_up_time)
-        elif (j % 8 < 8): # 6-7
-            maxp = int(max_pump_power*10)
-            string = string + "  -  Preinf: 0-%s%%" %(maxp)
+        if (j % 12 < 2): # 0-1
+            if time.time() - last_input_time < 2700: # If time.time() - last_input_time >= 2700, the system should either shutdown OR should be detecting that NTPD has reset time (in which case "On time" will be off for less than 5 seconds -- until thread_auto_dim_or_shutdown() reajusts start_script_time and last_input_time)
+                minutes = int((time.time() - start_script_time)/60)
+                string = string + "  -  On: %s min." %(minutes)
+            else:
+                string = string + "  -  Target: %s g." %(target_weight)
+        elif (j % 12 < 4): # 2-3
+            string = string + "  -  Target: %s g." %(target_weight)
+        else:
+            if flow_mode == "Auto":
+                if (j % 12 < 6): # 4-5
+                    string = string + "  -  Flow: Auto"
+                elif (j % 12 < 8): # 6-7
+                    string = string + "  -  Preinf: %ss." %(ramp_up_time)
+                elif (j % 12 < 10): # 8-9
+                    start_preinf = int(pp0*10)
+                    end_preinf   = int(pp1*10)
+                    string = string + "  -  Rise: %s-%s%%" %(start_preinf, end_preinf)
+                elif (j % 12 < 12): # 10-11
+                    peak_pump = int(pp2*10)
+                    string = string + "  -  Peak: %s%%" %(peak_pump)
+            elif flow_mode == "Manual": # 4 or 8
+                string = string + "  -  Flow: Manual"
+                j += 3
         j += 1
     display_text(string, area_belowgraph[0], 25, col_text)
 
@@ -918,26 +1019,6 @@ def tare_and_preheat():
     filter_on = True
     filtered_weight = 0.0
 
-trigger_volts_convert = False
-
-def read_voltage():
-    # Running in its own thread
-    global t1, voltsdiff, trigger_volts_convert
-    # Voltages are read 16 times per second
-    while trigger_stop_scale == False:
-        try:
-            voltsdiff.append(-adc.readADCDifferential01(adc_resolution, sps)/1000.0)
-            t1 = time.time()
-            # print "%s: read_voltage() appending voltsdiff" %(t1)
-            trigger_volts_convert = True
-        except Exception as e:
-            print e
-            voltsdiff.append(voltsdiff[-1])
-            t1 = time.time()
-        # print "append voltsdiff: t1 = %s" %t1
-    if trigger_stop_scale == True:
-        # print "read_voltage thread exited"
-        return
 
 weighing_time = time.time()-1
 t1 = time.time()
@@ -960,7 +1041,7 @@ def convert_volts():
 
 def voltages_to_weight():
     # Conversion in grams every 10th of a second
-    global weight_series, weight_series_time, trigger_volts_convert
+    global trigger_volts_convert
     while trigger_stop_scale == False:
         if trigger_volts_convert == True:
             convert_volts()
@@ -998,28 +1079,32 @@ flow_smooth = 0
 
 def filter(current_weight, prev_weight, time1, time0, Q0, R):
     global x, P, filtered_weight, filtered_flow, flow_list5, flow_smooth
-    dt = time1 - time0
-    z = [current_weight, (current_weight-prev_weight)/dt] 
-    F = np.array([[1.0, dt],
-                  [0.0, 1.0]])
-    if (seconds_elapsed) < 8: 
-        Q = Q0 * (seconds_elapsed/8.0)**5
-        # Filter very aggressively early: Q should be close to 0.
-    else:
-        Q = Q0
-    x = np.dot(F, x)
-    P = np.dot(np.dot(F, P), F.T) + Q
-    y = z - x
-    R = R0
-    if shot_pouring == False: # At the end of shot: progressively reduce the amount of filtering to 0.
-        seconds_after_end = time.time() - end_shot_time
-        if  seconds_after_end < 1.5:
-            R = R0 * (1.5 - seconds_after_end)/1.5
+    try:
+        dt = time1 - time0
+        z = [current_weight, (current_weight-prev_weight)/dt] 
+        F = np.array([[1.0, dt],
+                      [0.0, 1.0]])
+        if (seconds_elapsed) < 7: 
+            Q = Q0 * (seconds_elapsed/7.0)**5
+            # Filter very aggressively early: Q should be close to 0.
         else:
-            R = R0 * 0.0
-    K = np.dot(P, np.linalg.inv(P + R))
-    x = x + np.dot(K, y)
-    P = P - np.dot((np.eye(2) - K), P)
+            Q = Q0
+        x = np.dot(F, x)
+        P = np.dot(np.dot(F, P), F.T) + Q
+        y = z - x
+        R = R0
+        if shot_pouring == False: # At the end of shot: progressively reduce the amount of filtering to 0.
+            seconds_after_end = time.time() - end_shot_time
+            if  seconds_after_end < 1.5:
+                R = R0 * (1.5 - seconds_after_end)/1.5
+            else:
+                R = R0 * 0.0
+        K = np.dot(P, np.linalg.inv(P + R))
+        x = x + np.dot(K, y)
+        P = P - np.dot((np.eye(2) - K), P)
+    except Exception as e:
+        print e
+        x = [current_weight, (current_weight-prev_weight)*sps]
     filtered_weight = x[0]
     filtered_flow = x[1]
     flow_list6.append(filtered_flow)
@@ -1034,15 +1119,24 @@ def save_temperature_logs():
                "shot_series": list(shot_series),
                "heat_series": list(heat_series)}, open(filename, "w"))
 
+def save_settings():
+    json.dump({"set_temp": set_temp, 
+               "target_weight": target_weight, 
+               "ramp_up_time": ramp_up_time, 
+               "pp0": pp0,
+               "pp1": pp1,
+               "pp2": pp2,
+               "kP": kP,
+               "kI": kI,
+               "kD": kD,
+               "k0": k0}, open("/home/pi/settings.txt", "w"))
+
 def shutdown():
     # Save data in json file (y, heat_series,)
     # Save settings (temperature, preinfusion, etc.) in another json file to be loaded later on.
     # save_temperature_logs()
     GPIO.cleanup()
-    json.dump({"set_temp": set_temp, 
-               "max_weight": max_weight, 
-               "ramp_up_time": ramp_up_time, 
-               "max_pump_power": max_pump_power}, open("/home/pi/settings.txt", "w"))
+    save_settings()
     pygame.quit()
     display_brightness(10)
     # os._exit(1)
@@ -1083,22 +1177,45 @@ def shutdown():
 #
 # e.g. in one state: button4 will start a shot, or stop a shot, or start steaming, or select.
 
+old_number_of_choices = 0
+
 def display_menu_items(items, n_item_selected, number_of_choices):
+    global first_index_shown, last_index_shown, old_number_of_choices
     max_height = 240 - 60 - 25
-    text_height = 25 * number_of_choices
+    text_height = 25 * min(6, number_of_choices) # Displaying at most 6 choices (text rows) at a time, with 25 vertical pixels for each row.
     margin_height = (max_height - text_height)/2
     lcd.fill(col_background, area_menu)
-    for i in range(0, number_of_choices):
-        display_text(items[i], (170, 60 + margin_height + 25*i), 25, col_white)
-    display_text(">", (160, 60 + margin_height - 2 + 25*(n_item_selected % number_of_choices)), 25, col_white)
+    index_selected = n_item_selected % number_of_choices
+    if old_number_of_choices != number_of_choices:
+        # Redefine first/last index if the menu has changed
+        first_index_shown = 0 
+        last_index_shown = min(6, number_of_choices) - 1
+    while index_selected > last_index_shown or index_selected < first_index_shown: 
+        if index_selected > last_index_shown: 
+            first_index_shown += 1
+            last_index_shown += 1
+        elif index_selected < first_index_shown:
+            first_index_shown -= 1
+            last_index_shown -= 1
+    row = 0
+    for i in range(first_index_shown, last_index_shown + 1): # i = 0...5, or i = 1...6, or i = 2...7
+        font = pygame.font.Font('/usr/share/fonts/truetype/liberation/LiberationSansNarrow-Bold.ttf', 17)
+        if i == index_selected:
+            # display_text(">", (160, 60 + margin_height - 2 + 25*row), 25, col_white)
+            text_surface = font.render(">", True, col_white)  
+            lcd.blit(text_surface, (150, 60 + margin_height + 25*row))
+        # display_text(items[i], (170, 60 + margin_height + 25*row), 25, col_white)
+        text_surface = font.render(items[i], True, col_white)  
+        lcd.blit(text_surface, (160, 60 + margin_height + 25*row))
+        row += 1
     pygame.display.update(area_menu)
+    old_number_of_choices = number_of_choices
 
 def display_main_menu():
-    global items, n_items_selected, n
-    items = ["Flush", "Shut Down", "Stop Weight", "Max Pump", "Preinf", "Backflush"]
+    global items, n
+    items = ["Flush", "Shut Down", "Target Weight", "Pump Power P0", "Pump Power P1", "Pump Power P2", "Preinfusion Time", "Backflush", "Flow Mode", "kP", "kI", "kD", "k0", "Reset Defaults", "Cancel Changes"]
     n = len(items)
     display_menu_items(items, n_item_selected, n)
-    # Menu is getting long. Should make it a scrolling menu. With only 6 items being displayed at a time.
     
 def display_change_param(name, value, units):
     # This is function is used to display: max weight, preinfusion time, max pump, etc. as they are being changed.
@@ -1113,7 +1230,8 @@ def display_confirm_shutdown_menu():
     m = len(items)
     display_menu_items(items, m_item_selected, m)
 
-    
+n_item_selected = 0
+
 def button1(channel):
     time.sleep(.01)
     if GPIO.input(button1_pin) != GPIO.LOW:
@@ -1123,17 +1241,19 @@ def button1(channel):
     global menu, n_item_selected, submenu, last_input_time
     last_input_time = time.time()
     display_brightness(100)
-    
+    # All this works as expected, but need to rewrite the (cryptic) logic behind all these if statements.
     if submenu == 0:
         menu = 1-menu
-    elif submenu == 1 or submenu == 2 or submenu == 3 or submenu == 4:
+    elif submenu >= 1:
         menu = 1
         submenu = 0
     reset_graph_area(menu, shot_pouring)
     refresh_temp_display(y, graph_top, graph_bottom, area_graph, area_text_temp)
     if menu == 1:
-        n_item_selected = 0
+        # n_item_selected = 0
         display_main_menu()
+    if menu == 0:
+        n_item_selected = 0
 
     
 def button2(channel):
@@ -1142,7 +1262,7 @@ def button2(channel):
         print "Probably a false positive button2 press"
         return
     print "Button 2 pressed"
-    global set_temp, shot_temp, n_item_selected, m_item_selected, max_weight, max_pump_power, ramp_up_time, last_input_time
+    global set_temp, shot_temp, n_item_selected, m_item_selected, target_weight, pp0, pp1, pp2, ramp_up_time, last_input_time, flow_mode, kP, kI, kD, k0
     last_input_time = time.time()
     display_brightness(100)
     
@@ -1158,17 +1278,47 @@ def button2(channel):
             m_item_selected -= 1
             display_confirm_shutdown_menu()
         elif submenu == 2:
-            if max_weight < 50:
-                max_weight += 1
-            display_change_param("Stop Weight:", int(max_weight), "g.")
+            if target_weight < 50:
+                target_weight += 1
+            display_change_param("Target Weight:", int(target_weight), "g.")
         elif submenu == 3:
-            if max_pump_power < 10:
-                max_pump_power += 1
-            display_change_param("Max Pump Power:", int(max_pump_power*10), "%")
+            if pp0 < 10 and pp0 < pp1:
+                pp0 += 1
+            display_change_param("Pump Power P0:", int(pp0*10), "%")
         elif submenu == 4:
-            if ramp_up_time < 15:
+            if pp1 < 10 and pp1 < pp2:
+                pp1 += 1
+            display_change_param("Pump Power P1:", int(pp1*10), "%")
+        elif submenu == 5:
+            if pp2 < 10:
+                pp2 += 1
+            display_change_param("Pump Power P2:", int(pp2*10), "%")
+        elif submenu == 6:
+            if ramp_up_time < 10:
                 ramp_up_time += 1
-            display_change_param("Up Pump Over:", int(ramp_up_time), "s.")
+            display_change_param("Preinfusion:", int(ramp_up_time), "s.")
+        elif submenu == 8:
+            if flow_mode == "Manual":
+                flow_mode = "Auto"
+            else:
+                flow_mode = "Manual"
+            display_change_param("Flow Mode:", flow_mode, "")
+        elif submenu == 9:
+            if kP < 0.20:
+                kP += .005
+            display_change_param("PID: kP:", kP, "")
+        elif submenu == 10:
+            if kI < 0.30:
+                kI += .01
+            display_change_param("PID: kI:", kI, "")
+        elif submenu == 11:
+            if kD < 4:
+                kD += .10
+            display_change_param("PID: kD:", kD, "")
+        elif submenu == 12:
+            if k0 < .06:
+                k0 += .005
+            display_change_param("PID: k0:", k0, "")
         
         
 
@@ -1178,7 +1328,7 @@ def button3(channel):
         print "Probably a false positive button3 press"
         return
     print "Button 3 pressed"
-    global set_temp, shot_temp, n_item_selected, m_item_selected, max_weight, max_pump_power, ramp_up_time, last_input_time
+    global set_temp, shot_temp, n_item_selected, m_item_selected, target_weight, pp0, pp1, pp2, ramp_up_time, last_input_time, flow_mode, kP, kI, kD, k0
     last_input_time = time.time()
     display_brightness(100)
     
@@ -1194,17 +1344,47 @@ def button3(channel):
             m_item_selected += 1
             display_confirm_shutdown_menu()
         elif submenu == 2:
-            if max_weight > 24:
-                max_weight -= 1
-            display_change_param("Stop Weight:", int(max_weight), "g.")
+            if target_weight > 24:
+                target_weight -= 1
+            display_change_param("Target Weight:", int(target_weight), "g.")
         elif submenu == 3:
-            if max_pump_power > 3:
-                max_pump_power -= 1
-            display_change_param("Max Pump Power:", int(max_pump_power*10), "%")
+            if pp0 > 1:
+                pp0 -= 1
+            display_change_param("Pump Power P0:", int(pp0*10), "%")
         elif submenu == 4:
+            if pp1 > 1 and pp1 > pp0:
+                pp1 -= 1
+            display_change_param("Pump Power P1:", int(pp1*10), "%")
+        elif submenu == 5:
+            if pp2 > 3 and pp2 > pp1:
+                pp2 -= 1
+            display_change_param("Pump Power P2:", int(pp2*10), "%")
+        elif submenu == 6:
             if ramp_up_time > 0:
                 ramp_up_time -= 1
-            display_change_param("Up Pump Over:", int(ramp_up_time), "s.")
+            display_change_param("Preinfusion:", int(ramp_up_time), "s.")
+        elif submenu == 8:
+            if flow_mode == "Manual":
+                flow_mode = "Auto"
+            else:
+                flow_mode = "Manual"
+            display_change_param("Flow Mode:", flow_mode, "")
+        elif submenu == 9:
+            if kP > 0.00:
+                kP -= .005
+            display_change_param("PID: kP:", kP, "")
+        elif submenu == 10:
+            if kI > 0:
+                kI -= .01
+            display_change_param("PID: kI:", kI, "")
+        elif submenu == 11:
+            if kD > 0:
+                kD -= .10
+            display_change_param("PID: kD:", kD, "")
+        elif submenu == 12:
+            if k0 > 0:
+                k0 -= .005
+            display_change_param("PID: k0:", k0, "")
         
 
 def button4(channel):
@@ -1237,7 +1417,8 @@ def button4(channel):
             reset_graph_area(menu, shot_pouring)
             refresh_temp_display(y, graph_top, graph_bottom, area_graph, area_text_temp)
             trigger_stop_scale = False
-            thread.start_new_thread(read_voltage, ())
+            thread.start_new_thread(read_adc, ())
+            # thread.start_new_thread(read_voltage, ())
             thread.start_new_thread(voltages_to_weight, ())
             thread.start_new_thread(tare_and_preheat, ())
             thread.start_new_thread(counting_seconds, ())
@@ -1251,6 +1432,7 @@ def button4(channel):
             if flush_on == False:
                 flush_on = True
                 thread.start_new_thread(flush, ())
+                thread.start_new_thread(read_adc, ())
                 thread.start_new_thread(display_pump_power, ())
             elif flush_on == True:
                 display_main_menu()
@@ -1278,22 +1460,57 @@ def button4(channel):
                 m_item_selected = 0
                 button4_repress = False
                 display_main_menu()
+                save_settings()
                 save_temperature_logs()
         elif n_item_selected % n == 2:
             submenu = 2
-            display_change_param("Stop Weight:", int(max_weight), "g.")
+            display_change_param("Target Weight:", int(target_weight), "g.")
         elif n_item_selected % n == 3:
             submenu = 3
-            display_change_param("Max Pump Power:", int(max_pump_power*10), "%")
+            display_change_param("Pump Power P0:", int(pp0*10), "%")
         elif n_item_selected % n == 4:
             submenu = 4
-            display_change_param("Up Pump Over:", int(ramp_up_time), "s.")
-        elif n_item_selected % n == 5: 
+            display_change_param("Pump Power P1:", int(pp1*10), "%")
+        elif n_item_selected % n == 5:
+            submenu = 5
+            display_change_param("Pump Power P2:", int(pp2*10), "%")
+        elif n_item_selected % n == 6:
+            submenu = 6
+            display_change_param("Preinfusion:", int(ramp_up_time), "s.")
+        elif n_item_selected % n == 7: 
             # Backflush
             if backflush_on == False:
                 thread.start_new_thread(backflush, ())
             elif backflush_on == True:
                 backflush_on = False
+        elif n_item_selected % n == 8:
+            # Manual mode
+            submenu = 8
+            display_change_param("Flow Mode:", flow_mode, "")
+        elif n_item_selected % n == 9:
+            # kP
+            submenu = 9
+            display_change_param("PID: kP:", kP, "")
+        elif n_item_selected % n == 10:
+            # kI
+            submenu = 10
+            display_change_param("PID: kI:", kI, "")
+        elif n_item_selected % n == 11:
+            # kD
+            submenu = 11
+            display_change_param("PID: kD:", kD, "")
+        elif n_item_selected % n == 12:
+            # k0
+            submenu = 12
+            display_change_param("PID: k0:", k0, "")
+        elif n_item_selected % n == 13:
+            # Reset
+            reset_settings()
+        elif n_item_selected % n == 14:
+            # Reset
+            load_settings()
+        
+        
 
 def adjust_pid():
     global kP, kI, kD
@@ -1350,37 +1567,46 @@ def thread_refresh_timer_display():
 
 def thread_auto_dim_or_shutdown():
     while True:
+        global start_script_time, last_input_time, old_time, old_start_script_time
+        if time.time() - old_time > 100:
+            # The raspberry pi does not have a clock running when it is powered off; it syncs its time with a server at boottime.
+            # Problem: sometimes, it can take a few seconds to get the network connection; by then, the python script might already have started.
+            # The script substracts start_script_time from time.time() to measure time since start.
+            # If NTPD manages to sync time over Wifi only after the script started, things can get messy.
+            # this is a hack to reset start_script_time when it appears that NTPD has finished syncing.
+            print "Resetting start script time at" + time.strftime('%Y-%m-%d-%H:%M:%S')
+            old_start_script_time = start_script_time
+            start_script_time = time.time() - (old_time - old_start_script_time + 5)
+            last_input_time = last_input_time + start_script_time - old_start_script_time
         if time.time() - last_input_time >= 300 and brightness == 100:
             display_brightness(10)
         if time.time() - last_input_time >= 2700:
             shutdown()
+        old_time = time.time()
         time.sleep(5)
         # Could also use this function for auto-shutdown after 45 minutes (2700 seconds)
 
-# The raspberry pi does not have a clock running when it is powered off; it syncs its time with a server at boottime.
-# Problem: sometimes, it can take a few seconds to get the network connection; by then, the python script might already have started.
-# The script substracts time.time() relative to a start_script_time variable to display the uptime of the machine.
-# If start_script_time is measured before the RPI synced with the server, the uptime will be wrong.
-# Solution (hack): make the script wait a few seconds before measuring start_script_time, if the script was launched just after boot.
 
 uptime_s = uptime.uptime()
 print "Uptime in seconds %s" %(uptime_s)
 
-if uptime_s < 30: # If the script is launched right after boot
-    print "Waiting 15 seconds; hopefully NTPD will have synced properly in the meantime."
-    time.sleep(15) # will it leave enough time for NTPD to sync time over Wifi??? Otherwise start_script_time will be outdated (reflect time at last shutdown).
-    pass
+# if uptime_s < 30: # If the script is launched right after boot
+#     print "Waiting 15 seconds; hopefully NTPD will have synced properly in the meantime."
+#     time.sleep(15) # will it leave enough time for NTPD to sync time over Wifi??? Otherwise start_script_time will be outdated (reflect time at last shutdown).
+#     pass
 
+start_temp = read_sensor()
+old_time = time.time()
 start_script_time = time.time()
 last_input_time = start_script_time
-print "Start script time %s" %start_script_time
+print "Start script time: " + time.strftime('%Y-%m-%d-%H:%M:%S')
 
+thread.start_new_thread(thread_auto_dim_or_shutdown, ())
 thread.start_new_thread(thread_read_temp, ())
 thread.start_new_thread(thread_heat, ())
 thread.start_new_thread(thread_refresh_timer_display, ())
 thread.start_new_thread(thread_refresh_temp_display, ())
 thread.start_new_thread(thread_refresh_buttons, ())
-thread.start_new_thread(thread_auto_dim_or_shutdown, ())
 # thread.start_new_thread(adjust_pid, ())
 
 GPIO.add_event_detect(button1_pin, GPIO.FALLING, callback=button1, bouncetime = 100)

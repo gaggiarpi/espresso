@@ -36,7 +36,7 @@ rows <- df$flow_per_second > 0 & df$time < d$end - d$start - .1
 pred_min <- min(min(df$predicted_end_time[rows] - 1), 28)
 pred_max <- min(max(df$predicted_end_time[rows] + 1), 55)
 
-flow_max <- max(max(df$flow_per_second) + 0.1, 3.5)
+flow_max <- max(max(d$filtered_flow) + 0.1, 3.5)
 
 library(cowplot)
 
@@ -52,9 +52,8 @@ pdf(height = 8, width = 5, file = graph_filename)
 ###########################
 
 g1 <- ggplot() +
-		geom_hline(yintercept = d$max_weight) + geom_vline(xintercept = d$end - d$start) +
-		geom_segment(data = df[rows,], aes(x = time, y = weight, xend = predicted_end_time, yend = d$max_weight), col = "red", alpha = I(1/10), show.legend = FALSE) +
-		# geom_point(data = df[rows,], aes(x=time, y=weight), col = "red", alpha = I(1/10)) +
+		geom_hline(yintercept = d$target_weight) + geom_vline(xintercept = d$end - d$start) +
+		# geom_point(data = data.frame(time = d$full_weight_series_time - d$start, weight = d$full_weight_series), aes(x=time, y=weight), col = "black", size = .5) +
 		geom_line( data = dw, aes(x=time, y=weight)) + 
 		labs(title = paste(round(df$weight[nrow(df)],1), "g. in", round(d$end - d$start,1), "s."), y="Weight in grams", x= element_blank()) +
 		coord_cartesian(xlim = c(-.8,xmax), ylim = c(min(dw$weight)-.5, max(dw$weight) + 1)) +
@@ -64,6 +63,10 @@ g1 <- ggplot() +
 		geom_text(data = dw[c(which_i(5), which_i(10), which_i(20)),], aes(x=time, y=weight, label=paste(round(time,1), " s.", sep = "")), vjust = -1.8, size = 3)+
 		theme(plot.margin = unit(c(1, 1, 0, 1), "lines"))  
 
+if (sum(rows) != 0){
+	g1 <- g1 + geom_segment(data = df[rows,], aes(x = time, y = weight, xend = predicted_end_time, yend = d$target_weight), col = "red", alpha = I(1/10), show.legend = FALSE) 
+	
+}
 ###########################
 # Flow rate vs. Time      #
 ###########################
@@ -79,35 +82,26 @@ g2 <- ggplot(data = dw[dw$weight > .5 & dw$time < d$end-d$start,]) +
 		geom_line(aes(x = time, y = flow), color = "red2") +
 		labs(y="Flow rate", x = element_blank()) +
 		geom_vline(xintercept = d$end - d$start) +
-		coord_cartesian(xlim = c(-.8,xmax), ylim = c(-0.05, min(flow_max, 3.5))) +
+		coord_cartesian(xlim = c(-.8,xmax), ylim = c(-0.05, flow_max)) +
 		theme(plot.margin = unit(c(0.5, 1, 0, 1), "lines"))
 
 ###############################
 # Predicted end vs. Time      #
 ###############################
 
-# g3 <- ggplot(df[rows,], aes(x = time, y=predicted_end_time)) +
-# 		geom_ribbon(aes(ymin = 0, ymax = t2, x = time), fill = "blue", alpha = I(.1))+
-# 		geom_ribbon(aes(ymin = t2, ymax = t1, x = time), fill = "yellow", alpha = I(.1))+
-# 		geom_ribbon(aes(ymin = t1, ymax = t0, x = time), fill = "green", alpha = I(.05))+
-# 		geom_ribbon(aes(ymin = t0, ymax = 100, x = time), fill = "red", alpha = I(.1))+
-# 		geom_line(color = "darkgreen") + geom_point(color = "darkgreen") +
-# 		labs(y="Predicted end time", x = element_blank()) +
-# 		geom_vline(xintercept = d$end - d$start) +
-# 		coord_cartesian(xlim = c(-.8, xmax), ylim = c(pred_min, pred_max)) +
-# 		theme(plot.margin = unit(c(0.5, 1, 0, 1), "lines"))
-
-g3 <- ggplot(df[rows,]) + geom_point(aes(x = time, y = predicted_end_time), color = "darkgreen") +
-		geom_ribbon(aes(ymin = 0, ymax = t2, x = time), fill = "blue", alpha = I(.1))+
-		geom_ribbon(aes(ymin = t2, ymax = t1, x = time), fill = "yellow", alpha = I(.1))+
-		geom_ribbon(aes(ymin = t1, ymax = t0, x = time), fill = "green", alpha = I(.05))+
-		geom_ribbon(aes(ymin = t0, ymax = 100, x = time), fill = "red", alpha = I(.1))+
-		labs(y="Predicted end time", x = element_blank()) + 
-		geom_vline(xintercept = d$end - d$start) + 
-		coord_cartesian(xlim = c(-.8, xmax), ylim = c(pred_min, pred_max)) +
-		geom_line(data = dw[dw$weight > .5 & dw$time < d$end-d$start & dw$flow > 0,], aes(x = time, y = time + (d$max_weight-weight)/flow), color = "darkgreen") + 
-		theme(plot.margin = unit(c(0.5, 1, 0, 1), "lines")) 
-
+if (sum(rows) != 0){
+	g3 <- ggplot(df[rows,]) + geom_point(aes(x = time, y = predicted_end_time), color = "darkgreen") +
+			geom_ribbon(aes(ymin = 0, ymax = t2, x = time), fill = "blue", alpha = I(.1))+
+			geom_ribbon(aes(ymin = t2, ymax = t1, x = time), fill = "yellow", alpha = I(.1))+
+			geom_ribbon(aes(ymin = t1, ymax = t0, x = time), fill = "green", alpha = I(.05))+
+			geom_ribbon(aes(ymin = t0, ymax = 100, x = time), fill = "red", alpha = I(.1))+
+			labs(y="Predicted end time", x = element_blank()) + 
+			geom_vline(xintercept = d$end - d$start) + 
+			coord_cartesian(xlim = c(-.8, xmax), ylim = c(pred_min, pred_max)) +
+			geom_line(data = dw[dw$weight > .5 & dw$time < d$end-d$start & dw$flow > 0,], aes(x = time, y = time + (d$target_weight-weight)/flow - 1.15), color = "darkgreen") + 
+			theme(plot.margin = unit(c(0.5, 1, 0, 1), "lines")) 
+}
+		
 ###########################
 # Pump power vs. Time     #
 ###########################
@@ -121,7 +115,13 @@ g4 <- ggplot(df, aes(x = time, y=pump_power)) +
 		theme(plot.margin = unit(c(0.5, 1, 2, 1), "lines"))
 
 theme_set(theme_gray())
-plot_grid(g1, g2, g3, g4, ncol=1, align = "v", rel_heights = c(1, .6, .6, .85))
+if (sum(rows) != 0){
+	plot_grid(g1, g2, g3, g4, ncol=1, align = "v", rel_heights = c(1, .6, .6, .85))
+}
+if (sum(rows) == 0){
+	plot_grid(g1, g2, g4, ncol=1, align = "v", rel_heights = c(1, .6, .85))
+}
+
 dev.off()
 
 system(paste("sudo python /home/pi/send_email.py", name))
