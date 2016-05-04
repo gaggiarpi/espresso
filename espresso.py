@@ -17,6 +17,7 @@ import json
 import sys
 import uptime
 import numpy as np
+import itertools
 
 from Adafruit_ADS1x15 import ADS1x15
 from collections import deque
@@ -24,7 +25,7 @@ from collections import deque
 # Remember that the PiTFT display uses the following GPIO pins: all the hardware SPI pins (SCK, MOSI, MISO, CE0, CE1), and GPIO 24 and 25.
 # The 4 microswitches on the side of the display use: GPIO 17, 22, 23, 27 (from top to bottom)
 
-sys.stdout = open("/home/pi/logs/stdout-" + time.strftime('%Y-%m-%d-%H%M') + ".txt", 'w')
+# sys.stdout = open("/home/pi/logs/stdout-" + time.strftime('%Y-%m-%d-%H%M') + ".txt", 'w')
 
 # sys.stdout = open("/home/pi/logs/stdout-" + time.strftime('%Y-%m-%d-%H%M') + ".txt", 'w', 0)
 # This redirects stdout to a file. 0 means no buffering. Each new line is redirected immediately.
@@ -122,21 +123,6 @@ voltsdiff=deque([-adc.readADCDifferential01(adc_resolution, sps)/1000.0]*len_vol
 tare_weight = 0.0
 prev_weight = [0.0]*4
 mva_voltsdiff = 0.0
-
-
-# Setting the pump pulse sequences corresponding to power levels in 10% increments.
-
-pulse_sequence = [[0,0,0,0,0,0,0,0,0,0], # 0% power
-                  [0,0,0,0,1,0,0,0,0,0], # 10%
-                  [0,0,0,0,1,0,0,0,0,1], # 20%
-                  [0,0,0,1,0,0,1,0,0,1], # 30%
-                  [1,0,0,1,0,1,0,0,1,0], # 40%
-                  [1,0,1,0,1,0,1,0,1,0], # 50%
-                  [0,1,1,0,1,0,1,1,0,1], # 60%
-                  [1,1,1,0,1,1,0,1,1,0], # 70%
-                  [1,1,1,1,0,1,1,1,1,0], # 80%
-                  [1,1,1,1,0,1,1,1,1,1], # 90%
-                  [1,1,1,1,1,1,1,1,1,1]] # 100% power
 
 # Open-loop temperature control
 
@@ -246,7 +232,7 @@ filter_on = False
 
 # Screen resolution is 320 * 240.
 # Careful here: pygame.Rect uses these coordinates for rectangles: (left, top, width, height) [not (left, top, right, bottom)]
-area_graph = ((0,65),(280,155))
+area_graph = ((0,65),(290,155))
 # This is the reduced-size graph window, used when pulling a shot or entering the settings menu.
 # area_graph = ((0,100),(140,100)) # Note that we need to change npixels_per_tempreading
 area_text_temp = ((0,0),(160,60)) # same here, for the refresh_temp_display function.
@@ -380,20 +366,25 @@ def output_heat():
 #
 
 def output_pump():
-    i = 0
-    previous_pump_power = 0
-    pulses = [0]*10
-    while pump_power >= 0 and pump_power <= 10 and (flush_on == True or shot_pouring == True):
-        if pump_power != previous_pump_power:
-            pulses = pulse_sequence[pump_power]
-            previous_pump_power = pump_power
-        if i == 10:
-            i = 0
-        GPIO.output(pump_pin, pulses[i])
+    # Setting the pump pulse sequences corresponding to power levels in 10% increments.
+    pulse_sequence = [[0,0,0,0,0,0,0,0,0,0], # 0% power
+                      [0,0,0,0,1,0,0,0,0,0], # 10%
+                      [0,0,0,0,1,0,0,0,0,1], # 20%
+                      [0,0,0,1,0,0,1,0,0,1], # 30%
+                      [1,0,0,1,0,1,0,0,1,0], # 40%
+                      [1,0,1,0,1,0,1,0,1,0], # 50%
+                      [0,1,1,0,1,0,1,1,0,1], # 60%
+                      [1,1,1,0,1,1,0,1,1,0], # 70%
+                      [1,1,1,1,0,1,1,1,1,0], # 80%
+                      [1,1,1,1,0,1,1,1,1,1], # 90%
+                      [1,1,1,1,1,1,1,1,1,1]] # 100% power
+    p = pump_pin
+    cycle = itertools.cycle(range(0,10))
+    while pump_power in range(0, 11) and (flush_on == True or shot_pouring == True):
+        GPIO.output(p, pulse_sequence[pump_power][cycle.next()])
         time.sleep(.02)
-        i += 1
     if pump_power <= 0 or pump_power > 10 or flush_on == False or shot_pouring == False:
-        GPIO.output(pump_pin, 0)
+        GPIO.output(p, 0)
         if pump_power < 0 or pump_power > 10:
             print "Error, choose pump_power between 0 and 10"
         return
@@ -410,21 +401,21 @@ def read_adc():
                 adc_diff01 = adc.readADCDifferential01(adc_resolution, sps)
             except Exception as e:
                 print e
-            read_voltage()
+            read_voltage(adc_diff01)
         if read_pot_on == True:
             try:
                 adc_singl3 = adc.readADCSingleEnded(3, 4096, 860)
             except Exception as e:
                 print e
-            read_pot()
-            if trigger_stop_scale == False: # Give the loop a rest if we're only measuring the pot voltage (at a super high sampling rate already); but if we also need to measure the voltage differential from the scale (at a lower sampling rate, for more precision), skip this step...
+            read_pot(adc_singl3)
+            if trigger_stop_scale == True: # Give the loop a rest if we're only measuring the pot voltage (at a super high sampling rate already); but if we also need to measure the voltage differential from the scale (at a lower sampling rate, for more precision), skip this step...
                 time.sleep(.1)
     if read_pot_on == False and trigger_stop_scale == True:
         return
 
 trigger_volts_convert = False
 
-def read_voltage():
+def read_voltage(adc_diff01):
     # Running in its own thread
     global t1, voltsdiff, trigger_volts_convert
     # Voltages are read 16 times per second
@@ -433,7 +424,7 @@ def read_voltage():
     trigger_volts_convert = True
     # Let the volts-gram conversion and all the filtering happen in another thread.
 
-def read_pot():
+def read_pot(adc_singl3):
     global pot_value
     old_pot_value = pot_value
     pot_value = adc_singl3/3313.0 * 100
@@ -730,7 +721,7 @@ os.putenv('SDL_FBDEV', '/dev/fb1')
 pygame.display.init()
 pygame.font.init()
 pygame.mouse.set_visible(False)
-lcd = pygame.display.set_mode((320, 240))
+lcd = pygame.display.set_mode((320, 240),0, 24)
 
 col_lightblue = (0,191,255)
 col_orange = (255,165,0)
@@ -795,20 +786,41 @@ def display_text(string, coordinates, size, color):
     text_surface = font.render(string, True, color)  
     lcd.blit(text_surface, coordinates)
 
+
 def draw_axes(y_axis, tick, graph_top, graph_bottom):
     for val in xrange(0, y_axis[1], tick) :
         coord_val = coordinates(y_axis, val, graph_top, graph_bottom)
         if (coord_val < graph_bottom) and (coord_val > graph_top): # remember that y coordinates start at 0 from the top of the display
-            pygame.draw.line(lcd, col_text, (graph_left, coord_val), (graph_right-20, coord_val)) # change this 300 value, based on graph_right
-            display_text(str(val), (graph_right-15, coord_val-10), 20, col_text) # change this 305 value, based on graph_right, leave space for icons
+            pygame.draw.line(lcd, col_text, (graph_left, coord_val), (graph_right-30, coord_val)) # change this 300 value, based on graph_right
+            display_text(str(val), (graph_right-25, coord_val-10), 20, col_text) # change this 305 value, based on graph_right, leave space for icons
 
-def draw_lines(subset_y, y_axis, tick, graph_top, graph_bottom, color_series):
+def draw_lines(y_coord, y_axis, graph_top, graph_bottom, color_series):
     coord_set_temp = coordinates(y_axis, set_temp, graph_top, graph_bottom)
     if (coord_set_temp < graph_bottom) and (coord_set_temp > graph_top): # remember that y coordinates start at 0 from the top of the display
-        pygame.draw.line(lcd, col_templine, (graph_left, coord_set_temp), (graph_right-20, coord_set_temp)) # change this 300 value, based on graph_right
-    y_coord  = [coordinates(y_axis, subset_y[j], graph_top, graph_bottom) for j in xrange(0, len(subset_y))]
-    for j in xrange(1, len(y_coord)):
-        pygame.draw.line(lcd, color_series[j-1], (graph_left + npixels_per_tempreading*(j-1), y_coord[j-1]),(graph_left + npixels_per_tempreading*j, y_coord[j]), 1) # 2 is the line thickness here.
+        pygame.draw.line(lcd, col_templine, (graph_left, coord_set_temp), (graph_right-30, coord_set_temp)) # change this 300 value, based on graph_right
+    pointlist = [[graph_left + npixels_per_tempreading*j for j in range(0, len(y_coord))],
+                 [y_coord[j] for j in range(0, len(y_coord))]]
+    pointlist = [[pointlist[0][i],pointlist[1][i]] for i in range(0, len(y_coord))]
+    pygame.draw.aalines(lcd, col_white, False, pointlist) # does anti-aliasing still work?.
+    # for j in xrange(1, len(y_coord)):
+    #         pygame.draw.aaline(lcd, color_series[j-1], (graph_left + npixels_per_tempreading*(j-1), y_coord[j-1]),(graph_left + npixels_per_tempreading*j, y_coord[j])) # 2 is the line thickness here.
+# graph_surface = pygame.Surface((graph_right-graph_left, graph_bottom-graph_top))
+#
+# def draw_lines(subset_y, y_axis, tick, graph_top, graph_bottom, color_series):
+#     coord_set_temp = coordinates(y_axis, set_temp, graph_top, graph_bottom)
+#     if (coord_set_temp < graph_bottom) and (coord_set_temp > graph_top): # remember that y coordinates start at 0 from the top of the display
+#         pygame.draw.line(lcd, col_templine, (graph_left, coord_set_temp), (graph_right-30, coord_set_temp)) # change this 300 value, based on graph_right
+#     y_coord  = [coordinates(y_axis, subset_y[j], graph_top, graph_bottom) for j in xrange(0, len(subset_y))]
+#     # pointlist = [[[graph_left + npixels_per_tempreading*(j-1), y_coord[j-1]], [graph_left + npixels_per_tempreading*j, y_coord[j]]] for j in range(1, len(y_coord))]
+#     # pointlist = list(itertools.chain.from_iterable(pointlist))
+#     # pygame.draw.lines(lcd, col_white, False, pointlist, 1)
+#     graph_surface.lock()
+#     for j in xrange(1, len(y_coord)):
+#         pygame.draw.aaline(graph_surface, color_series[j-1], (npixels_per_tempreading*(j-1), y_coord[j-1] - graph_top),(npixels_per_tempreading*j, y_coord[j] - graph_top)) # 2 is the line thickness here.
+#     #   pygame.draw.line(lcd, color_series[j-1], (graph_left + npixels_per_tempreading*(j-1), y_coord[j-1]),(graph_left + npixels_per_tempreading*j, y_coord[j]), 1) # 2 is the line thickness here.
+#     graph_surface.unlock()
+#     lcd.blit(graph_surface, (graph_left, graph_top))
+
 
 def draw_power(power_data):
     for j in xrange(0, len(power_data)):
@@ -818,37 +830,43 @@ j = 0
 
 def draw_belowgraph():
     global j
-    string = "T: " + str(set_temp) + u"\u2103" + "  -  H: " + str(str(int(power)) + "%").rjust(4) 
+    string1 = "T: " + str(set_temp) + u"\u2103" + "  -  H: " 
+    display_text(string1, area_belowgraph[0], 25, col_text)
+    string2 = str(int(power)) + "%  -"
+    surf = pygame.font.Font(None, 25).render(string2, True, col_white)
+    width = surf.get_width()
+    display_text(string2, (100+59-width, area_belowgraph[0][1]), 25, col_text)
     if steaming_on == True:
-        string = string + "  -  Steam"
+        string3 = "  -  Steam"
     if steaming_on == False:
         # Update the rest of the display only every 2 refreshes
         if (j % 12 < 2): # 0-1
             if time.time() - last_input_time < 2700: # If time.time() - last_input_time >= 2700, the system should either shutdown OR should be detecting that NTPD has reset time (in which case "On time" will be off for less than 5 seconds -- until thread_auto_dim_or_shutdown() reajusts start_script_time and last_input_time)
                 minutes = int((time.time() - start_script_time)/60)
-                string = string + "  -  On: %s min." %(minutes)
+                string3 = "On: %s min." %(minutes)
             else:
-                string = string + "  -  Target: %s g." %(target_weight)
+                string3 = "Target: %s g." %(target_weight)
         elif (j % 12 < 4): # 2-3
-            string = string + "  -  Target: %s g." %(target_weight)
+            string3 = "Target: %s g." %(target_weight)
         else:
             if flow_mode == "Auto":
                 if (j % 12 < 6): # 4-5
-                    string = string + "  -  Flow: Auto"
+                    string3 = "Flow: Auto"
                 elif (j % 12 < 8): # 6-7
-                    string = string + "  -  Preinf: %ss." %(ramp_up_time)
+                    string3 = "Preinf: %ss." %(ramp_up_time)
                 elif (j % 12 < 10): # 8-9
                     start_preinf = int(pp0*10)
                     end_preinf   = int(pp1*10)
-                    string = string + "  -  Rise: %s-%s%%" %(start_preinf, end_preinf)
+                    string3 = "Rise: %s-%s%%" %(start_preinf, end_preinf)
                 elif (j % 12 < 12): # 10-11
                     peak_pump = int(pp2*10)
-                    string = string + "  -  Peak: %s%%" %(peak_pump)
+                    string3 = "Peak: %s%%" %(peak_pump)
             elif flow_mode == "Manual": # 4 or 8
-                string = string + "  -  Flow: Manual"
+                string3 = "Flow: Manual"
                 j += 3
         j += 1
-    display_text(string, area_belowgraph[0], 25, col_text)
+    display_text(string3, (165, area_belowgraph[0][1]), 25, col_text)
+
 
 def refresh_timer_display(seconds_elapsed, area_timer):
     lcd.fill(col_background, rect = area_timer)
@@ -857,37 +875,55 @@ def refresh_timer_display(seconds_elapsed, area_timer):
     #display_text(str(seconds_elapsed)+" s.", (180, 5), 70, col_text)
     pygame.display.update(area_timer)
 
+prev_y_axis = (0, 0)
+y_minmax = (65, 215)
+prev_y_minmax = (0, 0)
+
 def refresh_temp_display(y, graph_top, graph_bottom, area_graph, area_text_temp):
-    # Erase the areas to be updated
-    lcd.fill(col_background, rect = area_timer)
-    lcd.fill(col_background, rect = area_graph)
-    lcd.fill(col_background, rect = area_text_temp)
-    lcd.fill(col_background, rect = area_belowgraph)
+    global prev_y_axis, prev_y_minmax, prev_x_range
     # Transform the series of 150 most recent ys into coordinates on the screen
-    n_datapoints = int(math.floor((graph_right-20-graph_left)/npixels_per_tempreading))
+    n_datapoints = int(math.floor((graph_right-30-graph_left)/npixels_per_tempreading))
     subset_y = [y[k] for k in xrange(max(0, len(y)-n_datapoints), len(y))]
     subset_heat_series = [heat_series[k] for k in xrange(max(0, len(heat_series)-n_datapoints), len(heat_series))]
     subset_shot_series = [shot_series[k] for k in xrange(max(0, len(shot_series)-n_datapoints), len(shot_series))]
     color_series = [col_red if whatshappening else col_white for whatshappening in subset_shot_series]
     # Find the range of y to be plotted, the tick marks, and draw.
     y_axis = axis_min_max(subset_y)
+    y_coord  = [coordinates(y_axis, subset_y[j], graph_top, graph_bottom-25) for j in xrange(0, len(subset_y))]
     tick = BestTick(y_axis[1]-y_axis[0])
+    # Erase the areas to be updated
+    if y_axis == prev_y_axis and area_graph[1][0] == prev_x_range:
+        # Redraw only a subset of area_graph if y_axis hasn't changed.
+        y_minmax = (int(min(y_coord)), int(max(y_coord)))
+        area_graph_reduced = ((0, min(y_minmax[0], prev_y_minmax[0]) - 2 ), 
+                              (area_graph[1][0], 5 + max(y_minmax[1] - y_minmax[0], prev_y_minmax[1] - prev_y_minmax[0])))
+    else:
+        y_minmax = (int(min(y_coord)), int(max(y_coord)))
+        area_graph_reduced = area_graph
+    # lcd.fill(col_background, rect = area_graph)
+    lcd.fill(col_background, rect = area_graph_reduced)
+    lcd.fill(col_background, rect = area_timer)
+    lcd.fill(col_background, rect = area_text_temp)
+    lcd.fill(col_background, rect = area_belowgraph)
+    lcd.fill(col_background, rect = ((0,195),(area_graph[1][0], 25)))
     draw_power(subset_heat_series)
     draw_axes(y_axis, tick, graph_top, graph_bottom-25)
-    draw_lines(subset_y, y_axis, tick, graph_top, graph_bottom-25, color_series)
+    draw_lines(y_coord, y_axis, graph_top, graph_bottom-25, color_series)
     if trigger_stop_scale == True:
         draw_belowgraph()
         if subset_y[-1] >= 100:
             display_text(str(int(round(subset_y[-1]))) + u"\u2103", (5, 5), 60, col_text)
         elif subset_y[-1] < 100:
             display_text('{0:.1f}'.format(subset_y[-1]) + u"\u2103", (5, 5), 60, col_text) # u"\u2103" is the unicode degrees celsisus sign.
-        pygame.display.update(area_text_temp)
         if (last_weight != 0) and (last_timer != 0):
             display_text("Last shot", (180, 8), 25, col_text)
             display_text("%0.0f s. / %0.0f g." %(last_timer, last_weight), (180, 26), 25, col_text)
-        pygame.display.update(area_timer)
-    pygame.display.update(area_graph)
-    pygame.display.update(area_belowgraph)
+        pygame.display.update([area_graph_reduced, area_belowgraph, ((0,195),(area_graph[1][0], 25)), area_text_temp, area_timer])
+    else:
+        pygame.display.update([area_graph_reduced, area_belowgraph, ((0,195),(area_graph[1][0], 25))])
+    prev_y_axis = y_axis
+    prev_y_minmax = y_minmax
+    prev_x_range = area_graph_reduced[1][0]
     
 
 icon_start = pygame.image.load(os.path.join('/home/pi/icons', 'start.png'))
@@ -940,13 +976,13 @@ def reset_graph_area(menu, shot_pouring):
         # print "Big graph area"
         lcd.fill(col_background, rect = area_graph)
         pygame.display.update(area_graph)
-        area_graph = ((0,65),(280,155))
+        area_graph = ((0,65),(290,155))
         npixels_per_tempreading = 2
     elif (menu == 1) or (shot_pouring == True):
         # print "Small graph area"
         lcd.fill(col_background, rect = area_graph)
         pygame.display.update(area_graph)
-        area_graph = ((0,65),(140,155))
+        area_graph = ((0,65),(150,155))
         npixels_per_tempreading = 1
     graph_top = area_graph[0][1]
     graph_bottom = area_graph[0][1] + area_graph[1][1] 
@@ -955,7 +991,7 @@ def reset_graph_area(menu, shot_pouring):
 
 def display_pump_power():
     global old_pump_power
-    old_pump_power = -1        
+    old_pump_power = -1
     while (trigger_stop_scale == False) or (flush_on == True):
         if (pump_power != old_pump_power):
             # print "display pump power update"
@@ -969,7 +1005,7 @@ def display_pump_power():
             # pygame.display.update((200, 65, 70, 155))
             pygame.display.update((150, 65, 130, 155))
             old_pump_power = pump_power
-        time.sleep(.01)
+        time.sleep(.05)
     if (trigger_stop_scale == True) and (flush_on == False):
         # print "Exiting display pump power thread"
         return
@@ -1550,12 +1586,12 @@ def thread_refresh_temp_display():
         if trigger_refresh_temp_display:
             refresh_temp_display(y, graph_top, graph_bottom, area_graph, area_text_temp)
             trigger_refresh_temp_display = False
-        time.sleep(.01)
+        time.sleep(.02)
 
 def thread_refresh_buttons():
     while True:
         refresh_buttons(menu, shot_pouring, steaming_on, backflush_on, flush_on)
-        time.sleep(.01)
+        time.sleep(.02)
 
 def thread_refresh_timer_display():
     global trigger_refresh_timer
@@ -1563,7 +1599,7 @@ def thread_refresh_timer_display():
         if trigger_refresh_timer:
             refresh_timer_display(seconds_elapsed, area_timer)
             trigger_refresh_timer = False
-        time.sleep(.01)
+        time.sleep(.02)
 
 def thread_auto_dim_or_shutdown():
     while True:
@@ -1607,7 +1643,6 @@ thread.start_new_thread(thread_heat, ())
 thread.start_new_thread(thread_refresh_timer_display, ())
 thread.start_new_thread(thread_refresh_temp_display, ())
 thread.start_new_thread(thread_refresh_buttons, ())
-# thread.start_new_thread(adjust_pid, ())
 
 GPIO.add_event_detect(button1_pin, GPIO.FALLING, callback=button1, bouncetime = 100)
 GPIO.add_event_detect(button2_pin, GPIO.FALLING, callback=button2, bouncetime = 100)

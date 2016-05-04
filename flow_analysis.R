@@ -63,20 +63,13 @@ g1 <- ggplot() +
 		geom_text(data = dw[c(which_i(5), which_i(10), which_i(20)),], aes(x=time, y=weight, label=paste(round(time,1), " s.", sep = "")), vjust = -1.8, size = 3)+
 		theme(plot.margin = unit(c(1, 1, 0, 1), "lines"))  
 
-if (sum(rows) != 0){
-	g1 <- g1 + geom_segment(data = df[rows,], aes(x = time, y = weight, xend = predicted_end_time, yend = d$target_weight), col = "red", alpha = I(1/10), show.legend = FALSE) 
-	
-}
+# if (sum(rows) != 0){
+# 	g1 <- g1 + geom_segment(data = df[rows,], aes(x = time, y = weight, xend = predicted_end_time, yend = d$target_weight), col = "red", alpha = I(1/10), show.legend = FALSE)
+# }
+
 ###########################
 # Flow rate vs. Time      #
 ###########################
-
-# g2 <- ggplot(df[rows,], aes(x = time, y=flow_per_second)) +
-# 		geom_line(color = "red2") + geom_point(color = "red2") +
-# 		labs(y="Flow rate", x = element_blank()) +
-# 		geom_vline(xintercept = d$end - d$start) +
-# 		coord_cartesian(xlim = c(-.8,xmax), ylim = c(-0.05, min(flow_max, 3.5))) +
-# 		theme(plot.margin = unit(c(0.5, 1, 0, 1), "lines"))
 
 g2 <- ggplot(data = dw[dw$weight > .5 & dw$time < d$end-d$start,]) +
 		geom_line(aes(x = time, y = flow), color = "red2") +
