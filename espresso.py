@@ -18,6 +18,7 @@ import sys
 import uptime
 import numpy as np
 import itertools
+import traceback
 
 from Adafruit_ADS1x15 import ADS1x15
 from collections import deque
@@ -27,9 +28,10 @@ from collections import deque
 
 # sys.stdout = open("/home/pi/logs/stdout-" + time.strftime('%Y-%m-%d-%H%M') + ".txt", 'w')
 
-# sys.stdout = open("/home/pi/logs/stdout-" + time.strftime('%Y-%m-%d-%H%M') + ".txt", 'w', 0)
-# This redirects stdout to a file. 0 means no buffering. Each new line is redirected immediately.
+sys.stdout = open("/home/pi/logs/stdout-" + time.strftime('%Y-%m-%d-%H%M') + ".txt", 'w', 0)
+sys.stderr = open("/home/pi/logs/stderr-" + time.strftime('%Y-%m-%d-%H%M') + ".txt", 'w', 0)
 
+# This redirects stdout to a file. 0 means no buffering. Each new line is redirected immediately.
 
 GPIO.setmode(GPIO.BCM)
 
@@ -180,13 +182,13 @@ def reset_settings():
     set_temp = 90
     target_weight = 36
     ramp_up_time = 10
-    pp0 = 1.0
-    pp1 = 7.0
-    pp2 = 7.0
+    pp0 = 1
+    pp1 = 7
+    pp2 = 7
     kP = 0.07
     kI = 0.12
-    kD = 3.50
-    k0 = 0.00
+    kD = 2.50
+    k0 = 0.035
     # Or these values seem quite good: {"kI": 0.12, "pp2": 7.0, "pp1": 7.0, "target_weight": 36, "k0": 0.035, "kD": 2.499999999999999, "ramp_up_time": 10, "pp0": 3.0, "set_temp": 90, "kP": 0.07}
 
 load_settings()
@@ -380,10 +382,10 @@ def output_pump():
                       [1,1,1,1,1,1,1,1,1,1]] # 100% power
     p = pump_pin
     cycle = itertools.cycle(range(0,10))
-    while pump_power in range(0, 11) and (flush_on == True or shot_pouring == True):
-        GPIO.output(p, pulse_sequence[pump_power][cycle.next()])
+    while pump_power >= 0 and pump_power <= 10 and (flush_on == True or shot_pouring == True):
+        GPIO.output(p, pulse_sequence[int(pump_power)][cycle.next()])
         time.sleep(.02)
-    if pump_power <= 0 or pump_power > 10 or flush_on == False or shot_pouring == False:
+    if pump_power < 0 or pump_power > 10 or flush_on == False or shot_pouring == False:
         GPIO.output(p, 0)
         if pump_power < 0 or pump_power > 10:
             print "Error, choose pump_power between 0 and 10"
@@ -400,13 +402,13 @@ def read_adc():
             try:
                 adc_diff01 = adc.readADCDifferential01(adc_resolution, sps)
             except Exception as e:
-                print e
+                print "Exception in read_adc(): adc.readADCDifferential01() " + e
             read_voltage(adc_diff01)
         if read_pot_on == True:
             try:
                 adc_singl3 = adc.readADCSingleEnded(3, 4096, 860)
             except Exception as e:
-                print e
+                print "Exception in read_adc(): adc.readADCSingleEnded() " + e
             read_pot(adc_singl3)
             if trigger_stop_scale == True: # Give the loop a rest if we're only measuring the pot voltage (at a super high sampling rate already); but if we also need to measure the voltage differential from the scale (at a lower sampling rate, for more precision), skip this step...
                 time.sleep(.1)
@@ -432,12 +434,17 @@ def read_pot(adc_singl3):
         pot_value = old_pot_value
 
 def flush():
-    global read_pot_on, pump_power
+    global read_pot_on, pump_power, trigger_refresh_display_pump
     thread.start_new_thread(output_pump, ())
     read_pot_on = True
+    trigger_refresh_display_pump = True
+    previous_pump_power = -1
     while flush_on == True:
-        pump_power = int(round(pot_value / 10, 0))
+        pump_power = clip(int(round(pot_value / 10, 0)), 0, 10)
         time.sleep(.1)
+        if pump_power != previous_pump_power:
+            trigger_refresh_display_pump = True
+            previous_pump_power = pump_power
     if flush_on == False:
         read_pot_on = False
         GPIO.output(pump_pin, 0)
@@ -493,21 +500,29 @@ def auto_adjust_pump(predicted_end_time, change_predicted_end_time, seconds_elap
                    [ -1, -2,       -2,           -3]] # Way too short
     return pump_action[a][b]
 
+def clip(x, low, high):
+    if x >= low and x <= high:
+        return x
+    elif x < low:
+        return low
+    elif x > high:
+        return high
 
 flow_mode = "Auto"
+
 
 def pour_shot():
     # This function will be run in its own thread
     print "pour_shot thread started"
     # Remember to open the 3-way valve here.
-    global pump_power, shot_pouring, end_shot_time, trigger_update_log_shot, flow_per_second, predicted_end_time, current_time, dt, read_pot_on
+    global pump_power, shot_pouring, end_shot_time, trigger_update_log_shot, flow_per_second, predicted_end_time, current_time, dt, read_pot_on, trigger_refresh_display_pump
     if flow_mode == "Manual":
         read_pot_on = True
         thread.start_new_thread(read_pot, ())
     time.sleep(time_preheat+.5)
     last_adjust = 0.0
     pump_power = 0
-    previous_pump_power = 0
+    previous_pump_power = -1
     dt = 1.5 
     thread.start_new_thread(output_pump, ()) 
     while shot_pouring == True:
@@ -519,7 +534,7 @@ def pour_shot():
             
             if (ramp_up_time == 0) and (seconds_elapsed < 11) and (filtered_weight <= 2):
                 # print "Case 0 - no ramp_up_time"
-                pump_power = pp2
+                pump_power = clip(int(pp2), 1, 10)
                 if (seconds_elapsed - last_adjust >= 1):
                     last_adjust = seconds_elapsed
                     trigger_update_log_shot = True
@@ -529,14 +544,14 @@ def pour_shot():
             
             elif (seconds_elapsed <= ramp_up_time) and (filtered_weight <= 2):
                 # print "Case 1 - ramping up from pp0 to pp1 until 2g"
-                pump_power = seconds_elapsed/ramp_up_time * (pp1 - pp0) + pp0 # increase pump power continuously during ramp_up_time.
-                if (int(pump_power) != previous_pump_power):
+                pump_power = int(clip(seconds_elapsed/ramp_up_time * (pp1 - pp0) + pp0, 1, 10)) # increase pump power continuously during ramp_up_time.
+                if (pump_power != previous_pump_power):
                     trigger_update_log_shot = True
                     last_adjust = seconds_elapsed
             elif (seconds_elapsed > ramp_up_time) and (seconds_elapsed < 11) and (filtered_weight <= 2) :
                 # print "Case 2 - after ramp_up_time, but before 11 seconds, and weight < 2"
-                pump_power = pp2
-                if (int(pump_power) != previous_pump_power) or (time.time()-last_log_time >= 1):
+                pump_power = int(clip(pp2, 1, 10))
+                if (pump_power != previous_pump_power) or (time.time()-last_log_time >= 1):
                     trigger_update_log_shot = True
             
             # Second stage of the shot: after 11 seconds, or if weight reaches 2 grams (whichever comes first), adjust pump power every second by evaluating the flow:
@@ -555,21 +570,20 @@ def pour_shot():
                         predicted_end_time = 100  # The solution: force a pump power increase by reporting a long predicted time.
                         old_predicted_end_time = 100
                         change_predicted_end_time = 0
-                    pump_power += auto_adjust_pump(predicted_end_time, change_predicted_end_time, seconds_elapsed)
-                    if pump_power < 1:
-                        pump_power = 1
-                    if pump_power > 10:
-                        pump_power = 10
+                    pump_change = auto_adjust_pump(predicted_end_time, change_predicted_end_time, seconds_elapsed)
+                    pump_power = clip(int(pump_power + pump_change), 1, 10)
                     old_predicted_end_time = predicted_end_time
                     last_adjust = seconds_elapsed
                     trigger_update_log_shot = True
-        
+                    
+                
+            
         elif flow_mode == "Manual":
-            pump_power = int(round(pot_value / 10, 0))
+            pump_power = clip(int(round(pot_value / 10, 0)), 0, 10)
             if (seconds_elapsed - last_adjust >= 1) or (pump_power != previous_pump_power):
                 last_adjust = seconds_elapsed
                 trigger_update_log_shot = True
-                previous_pump_power = pump_power
+        
         if filtered_weight > target_weight - 1.15*flow_smooth: 
             end_shot()
             pump_power = 0
@@ -577,15 +591,15 @@ def pour_shot():
             predicted_end_time = 0
             last_adjust = 0
             trigger_update_log_shot = True
-        pump_power = int(pump_power)
-        previous_pump_power = pump_power
-        # output_pump(pump_power)
+        
+        if pump_power != previous_pump_power:
+            trigger_refresh_display_pump = True
+            previous_pump_power = pump_power
         time.sleep(.125)
-    # Make sure that the thread can exit
+    
     if shot_pouring == False:
         GPIO.output(pump_pin, 0)
         read_pot_on = False
-        # print "pour_shot thread exited"
         return
 
 flow_per_second = 0
@@ -689,6 +703,8 @@ def end_shot():
     # Remember to close the 3-way valve here.
     thread.start_new_thread(wait_after_shot_and_refresh, ())
 
+last_log_time = time.time()
+
 def wait_after_shot_and_refresh():
     global trigger_refresh_temp_display, trigger_stop_scale, last_weight, last_timer, log_shot, trigger_update_log_shot, current_time, filter_on
     while time.time() - end_shot_time < 6:
@@ -696,7 +712,7 @@ def wait_after_shot_and_refresh():
             current_time = time.time() - start_script_time
             trigger_update_log_shot = True
         time.sleep(.02)
-    if time.time() - end_shot_time >= 5:
+    if time.time() - end_shot_time >= 6:
         reset_graph_area(menu, shot_pouring)
         lcd.fill(col_background, area_timer)
         pygame.display.update(area_timer)
@@ -709,6 +725,22 @@ def wait_after_shot_and_refresh():
         filter_on = False
         return
 
+# def try_it(f):
+#     # Quick and dirty way to make sure that we get a clean exit if something goes wrong.
+#     # Functions that run in their own thread are unsafe: if they crash, the whole script could crash with the GPIO output pins stuck in On position.
+#     def safe_function():
+#         try:
+#             f()
+#         except BaseException as e:
+#             clean_exit()
+#             print "Exiting: something went very wrong in " + str(f) + ". Exception: " + e
+#             traceback.print_exc()
+#             return
+#     return safe_function
+
+# def start_safe_thread(f, *args):
+#     # print "Starting safe thread: " + str(f)
+#     thread.start_new_thread(try_it(f), ())
 
 ######################################
 # DISPLAY INFO / MENUS ON THE SCREEN #
@@ -721,6 +753,7 @@ os.putenv('SDL_FBDEV', '/dev/fb1')
 pygame.display.init()
 pygame.font.init()
 pygame.mouse.set_visible(False)
+# lcd = pygame.display.set_mode((320, 240))
 lcd = pygame.display.set_mode((320, 240),0, 24)
 
 col_lightblue = (0,191,255)
@@ -798,14 +831,13 @@ def draw_lines(y_coord, y_axis, graph_top, graph_bottom, color_series):
     coord_set_temp = coordinates(y_axis, set_temp, graph_top, graph_bottom)
     if (coord_set_temp < graph_bottom) and (coord_set_temp > graph_top): # remember that y coordinates start at 0 from the top of the display
         pygame.draw.line(lcd, col_templine, (graph_left, coord_set_temp), (graph_right-30, coord_set_temp)) # change this 300 value, based on graph_right
-    pointlist = [[graph_left + npixels_per_tempreading*j for j in range(0, len(y_coord))],
-                 [y_coord[j] for j in range(0, len(y_coord))]]
-    pointlist = [[pointlist[0][i],pointlist[1][i]] for i in range(0, len(y_coord))]
-    pygame.draw.aalines(lcd, col_white, False, pointlist) # does anti-aliasing still work?.
-    # for j in xrange(1, len(y_coord)):
-    #         pygame.draw.aaline(lcd, color_series[j-1], (graph_left + npixels_per_tempreading*(j-1), y_coord[j-1]),(graph_left + npixels_per_tempreading*j, y_coord[j])) # 2 is the line thickness here.
-# graph_surface = pygame.Surface((graph_right-graph_left, graph_bottom-graph_top))
-#
+    # pointlist = [[graph_left + npixels_per_tempreading*j for j in range(0, len(y_coord))],
+    #              [y_coord[j] for j in range(0, len(y_coord))]]
+    # pointlist = [[pointlist[0][i],pointlist[1][i]] for i in range(0, len(y_coord))]
+    # pygame.draw.aalines(lcd, col_white, False, pointlist) # does anti-aliasing still work?.
+    for j in xrange(1, len(y_coord)):
+            pygame.draw.aaline(lcd, color_series[j-1], (graph_left + npixels_per_tempreading*(j-1), y_coord[j-1]),(graph_left + npixels_per_tempreading*j, y_coord[j]))
+
 # def draw_lines(subset_y, y_axis, tick, graph_top, graph_bottom, color_series):
 #     coord_set_temp = coordinates(y_axis, set_temp, graph_top, graph_bottom)
 #     if (coord_set_temp < graph_bottom) and (coord_set_temp > graph_top): # remember that y coordinates start at 0 from the top of the display
@@ -875,9 +907,9 @@ def refresh_timer_display(seconds_elapsed, area_timer):
     #display_text(str(seconds_elapsed)+" s.", (180, 5), 70, col_text)
     pygame.display.update(area_timer)
 
-prev_y_axis = (0, 0)
-y_minmax = (65, 215)
-prev_y_minmax = (0, 0)
+# prev_y_axis = (0, 0)
+# y_minmax = (65, 215)
+# prev_y_minmax = (0, 0)
 
 def refresh_temp_display(y, graph_top, graph_bottom, area_graph, area_text_temp):
     global prev_y_axis, prev_y_minmax, prev_x_range
@@ -890,22 +922,21 @@ def refresh_temp_display(y, graph_top, graph_bottom, area_graph, area_text_temp)
     # Find the range of y to be plotted, the tick marks, and draw.
     y_axis = axis_min_max(subset_y)
     y_coord  = [coordinates(y_axis, subset_y[j], graph_top, graph_bottom-25) for j in xrange(0, len(subset_y))]
+    # y_minmax = (int(min(y_coord)), int(max(y_coord)))
     tick = BestTick(y_axis[1]-y_axis[0])
     # Erase the areas to be updated
-    if y_axis == prev_y_axis and area_graph[1][0] == prev_x_range:
-        # Redraw only a subset of area_graph if y_axis hasn't changed.
-        y_minmax = (int(min(y_coord)), int(max(y_coord)))
-        area_graph_reduced = ((0, min(y_minmax[0], prev_y_minmax[0]) - 2 ), 
-                              (area_graph[1][0], 5 + max(y_minmax[1] - y_minmax[0], prev_y_minmax[1] - prev_y_minmax[0])))
-    else:
-        y_minmax = (int(min(y_coord)), int(max(y_coord)))
-        area_graph_reduced = area_graph
-    # lcd.fill(col_background, rect = area_graph)
-    lcd.fill(col_background, rect = area_graph_reduced)
+    # if y_axis == prev_y_axis and area_graph[1][0] == prev_x_range:
+    #     # Redraw only a subset of area_graph if y_axis hasn't changed.
+    #     area_graph_reduced = ((0, min(y_minmax[0], prev_y_minmax[0]) - 2 ),
+    #                           (area_graph[1][0], 5 + max(y_minmax[1], prev_y_minmax[1]) - min(y_minmax[0], prev_y_minmax[0])))
+    # else:
+    #     area_graph_reduced = area_graph
+    lcd.fill(col_background, rect = area_graph)
+    # lcd.fill(col_background, rect = area_graph_reduced)
     lcd.fill(col_background, rect = area_timer)
     lcd.fill(col_background, rect = area_text_temp)
     lcd.fill(col_background, rect = area_belowgraph)
-    lcd.fill(col_background, rect = ((0,195),(area_graph[1][0], 25)))
+    # lcd.fill(col_background, rect = ((0,195),(area_graph[1][0], 25)))
     draw_power(subset_heat_series)
     draw_axes(y_axis, tick, graph_top, graph_bottom-25)
     draw_lines(y_coord, y_axis, graph_top, graph_bottom-25, color_series)
@@ -918,12 +949,12 @@ def refresh_temp_display(y, graph_top, graph_bottom, area_graph, area_text_temp)
         if (last_weight != 0) and (last_timer != 0):
             display_text("Last shot", (180, 8), 25, col_text)
             display_text("%0.0f s. / %0.0f g." %(last_timer, last_weight), (180, 26), 25, col_text)
-        pygame.display.update([area_graph_reduced, area_belowgraph, ((0,195),(area_graph[1][0], 25)), area_text_temp, area_timer])
+        pygame.display.update([area_graph, area_belowgraph, area_text_temp, area_timer])
     else:
-        pygame.display.update([area_graph_reduced, area_belowgraph, ((0,195),(area_graph[1][0], 25))])
-    prev_y_axis = y_axis
-    prev_y_minmax = y_minmax
-    prev_x_range = area_graph_reduced[1][0]
+        pygame.display.update([area_graph, area_belowgraph])
+    # prev_y_axis = y_axis
+    # prev_y_minmax = y_minmax
+    # prev_x_range = area_graph_reduced[1][0]
     
 
 icon_start = pygame.image.load(os.path.join('/home/pi/icons', 'start.png'))
@@ -989,11 +1020,14 @@ def reset_graph_area(menu, shot_pouring):
     graph_left  = area_graph[0][0]
     graph_right = area_graph[0][0] + area_graph[1][0]
 
+trigger_refresh_display_pump = False
+
 def display_pump_power():
-    global old_pump_power
-    old_pump_power = -1
+    global trigger_refresh_display_pump
+    trigger_refresh_display_pump = True
     while (trigger_stop_scale == False) or (flush_on == True):
-        if (pump_power != old_pump_power):
+        if trigger_refresh_display_pump:
+            print "Pump power: %s" %(pump_power)
             # print "display pump power update"
             lcd.fill(col_background, rect = (150, 65, 130, 155))
             display_text("Pump", (200, 180), 25, col_text)
@@ -1004,7 +1038,7 @@ def display_pump_power():
                 lcd.fill(col_lightblue, rect= ((215, 170-(box-1)*10), (20, 8)))
             # pygame.display.update((200, 65, 70, 155))
             pygame.display.update((150, 65, 130, 155))
-            old_pump_power = pump_power
+            trigger_refresh_display_pump = False
         time.sleep(.05)
     if (trigger_stop_scale == True) and (flush_on == False):
         # print "Exiting display pump power thread"
@@ -1266,6 +1300,15 @@ def display_confirm_shutdown_menu():
     m = len(items)
     display_menu_items(items, m_item_selected, m)
 
+def clean_exit():
+    print "Exiting after cleaning up GPIO"
+    GPIO.output(heat_pin, 0)
+    GPIO.output(pump_pin, 0)
+    GPIO.cleanup()
+    pygame.quit()
+    display_brightness(10)
+    sys.exit()
+
 n_item_selected = 0
 
 def button1(channel):
@@ -1301,7 +1344,7 @@ def button2(channel):
     global set_temp, shot_temp, n_item_selected, m_item_selected, target_weight, pp0, pp1, pp2, ramp_up_time, last_input_time, flow_mode, kP, kI, kD, k0
     last_input_time = time.time()
     display_brightness(100)
-    
+
     if menu == 0:
         set_temp += 1
         shot_temp = set_temp
@@ -1355,8 +1398,7 @@ def button2(channel):
             if k0 < .06:
                 k0 += .005
             display_change_param("PID: k0:", k0, "")
-        
-        
+
 
 def button3(channel):
     time.sleep(.01)
@@ -1367,7 +1409,7 @@ def button3(channel):
     global set_temp, shot_temp, n_item_selected, m_item_selected, target_weight, pp0, pp1, pp2, ramp_up_time, last_input_time, flow_mode, kP, kI, kD, k0
     last_input_time = time.time()
     display_brightness(100)
-    
+
     if menu == 0:
         set_temp -= 1
         shot_temp = set_temp
@@ -1421,7 +1463,7 @@ def button3(channel):
             if k0 > 0:
                 k0 -= .005
             display_change_param("PID: k0:", k0, "")
-        
+
 
 def button4(channel):
     time.sleep(.01)
@@ -1432,7 +1474,7 @@ def button4(channel):
     global shot_pouring, pump_power, end_shot_time, trigger_stop_scale, steaming_on, set_temp, button4_repress, m_item_selected, n_item_selected, menu, submenu, backflush_on, flush_on, last_input_time
     last_input_time = time.time()
     display_brightness(100)
-    
+
     # Check if button 4 is called from within a submenu
     # This will change the behavior of button4: first button4 press: submenu is displayed; second button4 press: choice is selected.
     if submenu == 1:
@@ -1440,7 +1482,7 @@ def button4(channel):
     elif submenu == 0:
         button4_repress = False
         m_item_selected = 0
-    
+
     if menu == 0: # Main menu
         if shot_pouring == True:
             # Need to start a timer time_since_shot_ended here. Display ended time for 10 seconds; keep measuring weight for another 10 seconds; stay in shot display mode for 10 seconds.
@@ -1545,17 +1587,7 @@ def button4(channel):
         elif n_item_selected % n == 14:
             # Reset
             load_settings()
-        
-        
 
-def adjust_pid():
-    global kP, kI, kD
-    while True:
-        print "(P = %s, I = %s, D = %s)" %(kP, kI, kD)
-        answer = input("Enter P, I, D: ")
-        kP = answer[0]
-        kI = answer[1]
-        kD = answer[2]
 
 ##################################
 # THREADS REFRESHING THE DISPLAY #
@@ -1568,7 +1600,6 @@ def thread_read_temp():
         adjust_heating_power()
         trigger_heat = True
         trigger_refresh_temp_display = True
-        # No need to ask the thread to sleep. The conversion time of the DS18B20 sensor is about 0.83 seconds. read_temp() causes everybody else to wait
 
 def thread_heat():
     global trigger_heat
@@ -1620,16 +1651,9 @@ def thread_auto_dim_or_shutdown():
             shutdown()
         old_time = time.time()
         time.sleep(5)
-        # Could also use this function for auto-shutdown after 45 minutes (2700 seconds)
-
 
 uptime_s = uptime.uptime()
 print "Uptime in seconds %s" %(uptime_s)
-
-# if uptime_s < 30: # If the script is launched right after boot
-#     print "Waiting 15 seconds; hopefully NTPD will have synced properly in the meantime."
-#     time.sleep(15) # will it leave enough time for NTPD to sync time over Wifi??? Otherwise start_script_time will be outdated (reflect time at last shutdown).
-#     pass
 
 start_temp = read_sensor()
 old_time = time.time()
@@ -1657,96 +1681,9 @@ try:
     while True:
         pass
         time.sleep(1)
-except KeyboardInterrupt:
-    print "KeyboardInterrupt"
-    print "Exiting after cleaning up GPIO"
-    GPIO.cleanup()
+except:
+    clean_exit()
 
 
-
-# backlight: terminal commands
-# 
-# gpio pwmc 1000
-# gpio -g pwm 18 100
-# gpio -g pwm 18 1023
-# gpio -g pwm 18 0
-
-# Done:
-
-# * Separated read_temp from adjust_heating_power and refresh_temp_display
-# * Rewrote the while loops for the tread_ functions.
-
-
-# To do:
-
-# When pulling shot: display weight instead of temperature in the topleft corner.
-
-# If weight measurement is accurate and fast enough: calculate flowrate
-
-# When pulling shot:
-#
-# Weight g.                          Timer sec.
-#
-# [temp graph] [pump power gauge] [flowrate graph]
-#   Temp           Pump               Flow
-#   92C            100%               2 g/sec
-
-# Try to comment out thread.start_new_thread(thread_refresh_timer_display, ()) to see if CPU usage is still > 10%.
-# Rewrite the pump_pulse and pour_shot functions
-#        there needs to be a adjust_pump_power function which only updates a pulses global variable based on seconds_elapsed or user input (e.g. potentiometer). pump_pulse will cycle through pulses; it should be run in a separate thread when a shot is pulled.
-
-# Run the add_heat (controlling the GPIO pin for heat SSR) in a separate thread.
-
-# Is it OK if refresh_temp_display and read_temp are out of sync? (I guess so, but could there be a cleaner solution somehow -- e.g. read_temp tells refresh_temp_display to update as soon as there's new data?).
-
-# When in settings menu, it would be nice to reduce the size of the graph. Just change area_graph when menu == "Settings menu", and don't forget to put it back to its original values when going back in the main menu. Could do the same thing when a shot is being pulled, to free up some screen space -- and display the shot weight, and maybe a pump_power gauge.
-
-# Refine PID at equilibrium, so that when set_temp is reached, enough heat is generated to maintain the temp. When temperature within .5 degree of target: for example power  = 2% or 4%.
-
-# Buttons: Instead of defining instructions conditional on state for each button (which gets messy),
-# write conditions on state (is a shot being pulled? is steaming on? are we in the main menu?), and then redefine the buttons functions / update the display (draw the icons and update the text) accordingly.
-# have an update_state function that keeps track of state, and changes in state.
-# e.g. in one state: button1 will do x, button2 y, etc. , button4 will start a shot [and this is what buttons will look like]
-#      in another state:  button1 will do blah, button2, etc. , button4 will heat the boiler for steaming [and this is what buttons will look like]
-# Otherwise, it will get too messy very quickly.
-# Example of states that will affect the buttons and their meaning:
-# {(Menu: 0,1), (Submenu: 0,1,2,3), (Subsubmenu: 0,1,2,3,4), (mode: 0=idle, 1=pulling shot, 2=steaming)} 
-
-# "..." menu
-#         - Steam
-#         - Shutdown the Raspberry Pi.
-# For later:
-#         - Heating parameters:
-#                 - PID 
-#                 - during shot
-#         - Auto/manual stop.
-#               - if auto: shot time
-#            or - if auto: shot weight
-#         - Auto/manual pressure.
-#               - manual pressure: use the 10k pot.
-#               - auto preinf
-#               - (auto ramp down)
-#               - (do not exceed max flow rate.)
-
-# PID parameters and set_temp: save into a file when changes are made; read from the file when starting up.
-
-# Change color of lines when a shot is being pulled.
-
-# Take care of the load cell / weight and ADC conversion later.
-#
-# Done (kind of): 
-# PID
-# Adjust heat during shot (set values)
-# Steaming
-# Menus and buttons. Get icons here: https://www.google.com/design/icons/
-
-
-
-# Need to sync read_temp and adjust_heat:
-#
-# read_temp() data should have a timestamp.
-#
-# if time.time() - timestamp > .39:
-#     print "read_temp and adjust_heat are getting out of sync"
-#     GPIO heat False for the next .39
-
+sys.stderr.close()
+sys.stderr = sys.__stderr__
