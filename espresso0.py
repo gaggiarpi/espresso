@@ -161,13 +161,12 @@ flush_on = False
 old_flush_on = False
 
 def load_settings():
-    global set_temp, target_weight, time_a, time_b, pp0, pp1, pp2, kP, kI, kD, k0
+    global set_temp, target_weight, ramp_up_time, pp0, pp1, pp2, kP, kI, kD, k0
     try:
         settings = json.load(open("/home/pi/settings.txt","r"))
         set_temp = settings["set_temp"]
         target_weight = settings["target_weight"]
-        time_a = settings["time_a"]
-        time_b = settings["time_b"]
+        ramp_up_time = settings["ramp_up_time"]
         pp0 = settings["pp0"]
         pp1 = settings["pp1"]
         pp2 = settings["pp2"]
@@ -179,19 +178,18 @@ def load_settings():
         reset_settings()
 
 def reset_settings():
-    global set_temp, target_weight, time_a, time_b, pp0, pp1, pp2, kP, kI, kD, k0
+    global set_temp, target_weight, ramp_up_time, pp0, pp1, pp2, kP, kI, kD, k0
     set_temp = 90
-    target_weight = 32
-    time_a = 3
-    time_b = 8
-    pp0 = 5
-    pp1 = 1
+    target_weight = 36
+    ramp_up_time = 10
+    pp0 = 1
+    pp1 = 7
     pp2 = 7
     kP = 0.07
     kI = 0.12
     kD = 2.50
     k0 = 0.035
-    # Or these values seem quite good: {"kI": 0.12, "pp2": 7.0, "pp1": 7.0, "target_weight": 36, "k0": 0.035, "kD": 2.499999999999999, "time_a": 10, "pp0": 3.0, "set_temp": 90, "kP": 0.07}
+    # Or these values seem quite good: {"kI": 0.12, "pp2": 7.0, "pp1": 7.0, "target_weight": 36, "k0": 0.035, "kD": 2.499999999999999, "ramp_up_time": 10, "pp0": 3.0, "set_temp": 90, "kP": 0.07}
 
 load_settings()
 
@@ -532,35 +530,32 @@ def pour_shot():
         
         if flow_mode == "Auto":    
             
-            # Simple case: no time_b. Just apply full power 
+            # Simple case: no ramp_up_time. Just apply full power 
             
-            if (time_b == 0) and (seconds_elapsed < 12) and (filtered_weight <= 2):
-                # print "Case 0 - no time_a"
+            if (ramp_up_time == 0) and (seconds_elapsed < 11) and (filtered_weight <= 2):
+                # print "Case 0 - no ramp_up_time"
                 pump_power = clip(int(pp2), 1, 10)
                 if (seconds_elapsed - last_adjust >= 1):
-                    trigger_update_log_shot = True
                     last_adjust = seconds_elapsed
-            # First stage of the shot: pump power ramps up from pp0 to pp1 over ramp up time, then stays at pp1 until the end of preinfusion, then changes to pp2.
-            # But only as long as weight <= 2 grams and time < 12 seconds. Otherwise, pump_power is set according to the rules for Stage 2 of the shot
-            elif (seconds_elapsed <= time_a) and (seconds_elapsed < 12) and (filtered_weight <= 2):
-                # print "Case 1 - BEFORE time_a (unless weight/time hits 2g or 12 sec.): ramping up from pp0 to pp1"
-                pump_power = int(clip(seconds_elapsed/time_a * (pp1 - pp0) + pp0, 1, 10)) # increase pump power continuously during time_a.
+                    trigger_update_log_shot = True
+                    
+            # First stage of the shot: pump power ramps up from pp0 to pp1 over ramp up time, then pressure goes up to pp2 and stays there.
+            # But only as long as weight <= 2 grams and time < 11 seconds. Otherwise, pump_power is set according to the rules for Stage 2 of the shot
+            
+            elif (seconds_elapsed <= ramp_up_time) and (filtered_weight <= 2):
+                # print "Case 1 - ramping up from pp0 to pp1 until 2g"
+                pump_power = int(clip(seconds_elapsed/ramp_up_time * (pp1 - pp0) + pp0, 1, 10)) # increase pump power continuously during ramp_up_time.
                 if (pump_power != previous_pump_power):
                     trigger_update_log_shot = True
                     last_adjust = seconds_elapsed
-            elif (seconds_elapsed > time_a) and (seconds_elapsed < time_b) and (seconds_elapsed < 12) and (filtered_weight <= 2) :
-                # print "Case 2 - BETWEEN time_a and time_b (unless weight/time hits 2g or 12 sec.): hold pp1"
-                pump_power = int(clip(pp1, 1, 10))
-                if (pump_power != previous_pump_power) or (time.time()-last_log_time >= 1):
-                    trigger_update_log_shot = True
-                    last_adjust = seconds_elapsed
-            elif (seconds_elapsed >= time_b) and (seconds_elapsed < 12) and (filtered_weight <= 2) :
-                # print "Case 3 - AFTER time_b (unless weight/time hits 2g or 12 sec.): hold pp2"
+            elif (seconds_elapsed > ramp_up_time) and (seconds_elapsed < 11) and (filtered_weight <= 2) :
+                # print "Case 2 - after ramp_up_time, but before 11 seconds, and weight < 2"
                 pump_power = int(clip(pp2, 1, 10))
                 if (pump_power != previous_pump_power) or (time.time()-last_log_time >= 1):
                     trigger_update_log_shot = True
-                    last_adjust = seconds_elapsed
-            # Second stage of the shot: after 14 seconds, or if weight reaches 2 grams (whichever comes first), adjust pump power every second by evaluating the flow:
+            
+            # Second stage of the shot: after 11 seconds, or if weight reaches 2 grams (whichever comes first), adjust pump power every second by evaluating the flow:
+            
             else:
                 if (seconds_elapsed - last_adjust >= dt):
                     flow_per_second = flow_smooth
@@ -628,7 +623,7 @@ def update_log_shot():
     log_time_way_too_short = []
     log_start_shot_time = []
     
-    # Idea: record more parameters here: target_weight, time_a, max_power, temperature at the beginning of the shot, temperature at the end, power_when_pulling_shot, etc. These could be added to the text of the e-mail.
+    # Idea: record more parameters here: target_weight, ramp_up_time, max_power, temperature at the beginning of the shot, temperature at the end, power_when_pulling_shot, etc. These could be added to the text of the e-mail.
     
     last_log_time = 0
     trigger_update_log_shot = False
@@ -877,32 +872,30 @@ def draw_belowgraph():
         string3 = "  -  Steam"
     if steaming_on == False:
         # Update the rest of the display only every 2 refreshes
-        if (j % 14 < 2): # 0-1
+        if (j % 12 < 2): # 0-1
             if time.time() - last_input_time < 2700: # If time.time() - last_input_time >= 2700, the system should either shutdown OR should be detecting that NTPD has reset time (in which case "On time" will be off for less than 5 seconds -- until thread_auto_dim_or_shutdown() reajusts start_script_time and last_input_time)
                 minutes = int((time.time() - start_script_time)/60)
                 string3 = "On: %s min." %(minutes)
             else:
                 string3 = "Target: %s g." %(target_weight)
-        elif (j % 14 < 4): # 2-3
+        elif (j % 12 < 4): # 2-3
             string3 = "Target: %s g." %(target_weight)
         else:
             if flow_mode == "Auto":
-                if (j % 14 < 6): # 4-5
+                if (j % 12 < 6): # 4-5
                     string3 = "Flow: Auto"
-                elif (j % 14 < 8): # 6-7
-                    pump0 = int(pp0*10)
-                    pump1   = int(pp1*10)
-                    string3 = "Preinf: %s-%s%%" %(pump0, pump1)
-                elif (j % 14 < 10): # 8-9
-                    string3 = "Preinf: %ss." %(time_b)
-                elif (j % 14 < 12): # 10-11
-                    string3 = "Ramp-Up: %ss." %(time_a)
-                elif (j % 14 < 14): # 12-13
+                elif (j % 12 < 8): # 6-7
+                    string3 = "Preinf: %ss." %(ramp_up_time)
+                elif (j % 12 < 10): # 8-9
+                    start_preinf = int(pp0*10)
+                    end_preinf   = int(pp1*10)
+                    string3 = "Preinf: %s-%s%%" %(start_preinf, end_preinf)
+                elif (j % 12 < 12): # 10-11
                     peak_pump = int(pp2*10)
                     string3 = "Peak: %s%%" %(peak_pump)
-            elif flow_mode == "Manual": # 4 or 9
+            elif flow_mode == "Manual": # 4 or 8
                 string3 = "Flow: Manual"
-                j += 4
+                j += 3
         j += 1
     display_text(string3, (165, area_belowgraph[0][1]), 25, col_text)
 
@@ -1199,8 +1192,7 @@ def save_temperature_logs():
 def save_settings():
     json.dump({"set_temp": set_temp, 
                "target_weight": target_weight, 
-               "time_a": time_a,
-               "time_b": time_b, 
+               "ramp_up_time": ramp_up_time, 
                "pp0": pp0,
                "pp1": pp1,
                "pp2": pp2,
@@ -1291,7 +1283,7 @@ def display_menu_items(items, n_item_selected, number_of_choices):
 
 def display_main_menu():
     global items, n
-    items = ["Flush", "Shut Down", "Target Weight", "Pump Power P0", "Pump Power P1", "Pump Power P2", "Ramp-Up Time", "Preinfusion", "Backflush", "Flow Mode", "kP", "kI", "kD", "k0", "Reset Defaults", "Cancel Changes"]
+    items = ["Flush", "Shut Down", "Target Weight", "Pump Power P0", "Pump Power P1", "Pump Power P2", "Preinfusion Time", "Backflush", "Flow Mode", "kP", "kI", "kD", "k0", "Reset Defaults", "Cancel Changes"]
     n = len(items)
     display_menu_items(items, n_item_selected, n)
     
@@ -1317,142 +1309,17 @@ def clean_exit():
     display_brightness(10)
     sys.exit()
 
-def select_menu_item():
-    global steaming_on, backflush_on, flush_on, m_item_selected, n_item_selected, submenu, button4_repress, keep_reading_pot 
-    # Check if button 4 is called from within a submenu
-    # This will change the behavior of button4: first button4 press: submenu is displayed; second button4 press: choice is selected.
-    if submenu == 1:
-        button4_repress = True
-    else:
-        button4_repress = False
-        m_item_selected = 0
-    if n_item_selected % n == 0:
-        if flush_on == False:
-            flush_on = True
-            keep_reading_pot = True
-            thread.start_new_thread(read_adc, ())
-            thread.start_new_thread(flush, ())
-            thread.start_new_thread(display_pump_power, ())
-        elif flush_on == True:
-            display_main_menu()
-            flush_on = False
-    # elif n_item_selected % n == 2:
-    #     # Steam
-    #     if (steaming_on == False):
-    #         ####### STEAMING DISABLED ######## THE TEMPERATURE SENSOR IS ONLY RATED FOR 125 CELSIUS
-    #         set_temp = shot_temp
-    #         steaming_on = False
-    #         # set_temp = steam_temp
-    #         # steaming_on = True
-    #     elif steaming_on == True:
-    #         set_temp = shot_temp
-    #         steaming_on = False
-    elif n_item_selected % n == 1: 
-        # This is the "Shut Down" choice.
-        submenu = 1
-        # Asking for confirmation
-        display_confirm_shutdown_menu()
-        # This works, but it's awfully ugly
-        if (button4_repress == True) and (m_item_selected % m == 0): 
-            shutdown()
-        elif (button4_repress == True) and (m_item_selected % m == 1):
-            submenu = 0
-            m_item_selected = 0
-            button4_repress = False
-            display_main_menu()
-            save_settings()
-            save_temperature_logs()
-    elif n_item_selected % n == 2:
-        submenu = 2
-        display_change_param("Target Weight:", int(target_weight), "g.")
-    elif n_item_selected % n == 3:
-        submenu = 3
-        display_change_param("Pump Power P0:", int(pp0*10), "%")
-    elif n_item_selected % n == 4:
-        submenu = 4
-        display_change_param("Pump Power P1:", int(pp1*10), "%")
-    elif n_item_selected % n == 5:
-        submenu = 5
-        display_change_param("Pump Power P2:", int(pp2*10), "%")
-    elif n_item_selected % n == 6:
-        submenu = 6
-        display_change_param("Ramp-Up:", int(time_a), "s.")
-    elif n_item_selected % n == 7:
-        submenu = 7
-        display_change_param("Preinfusion:", int(time_b), "s.")
-    elif n_item_selected % n == 8: 
-        # Backflush
-        if backflush_on == False:
-            thread.start_new_thread(backflush, ())
-        elif backflush_on == True:
-            backflush_on = False
-    elif n_item_selected % n == 9:
-        # Manual mode
-        submenu = 9
-        display_change_param("Flow Mode:", flow_mode, "")
-    elif n_item_selected % n == 10:
-        # kP
-        submenu = 10
-        display_change_param("PID: kP:", kP, "")
-    elif n_item_selected % n == 11:
-        # kI
-        submenu = 11
-        display_change_param("PID: kI:", kI, "")
-    elif n_item_selected % n == 12:
-        # kD
-        submenu = 12
-        display_change_param("PID: kD:", kD, "")
-    elif n_item_selected % n == 13:
-        # k0
-        submenu = 13
-        display_change_param("PID: k0:", k0, "")
-    elif n_item_selected % n == 14:
-        # Reset
-        reset_settings()
-    elif n_item_selected % n == 15:
-        # Reset
-        load_settings()
-
 n_item_selected = 0
 
 def button1(channel):
-    time_button_press = time.time()
     time.sleep(.01)
-    if GPIO.input(button1_pin) != GPIO.LOW: # Button appears to have been released after 0.01 sec. This can't be an actual button press.
+    if GPIO.input(button1_pin) != GPIO.LOW:
         print "Probably a false positive button1 press"
         return
     print "Button 1 pressed"
-    long_press = False
     global menu, n_item_selected, submenu, last_input_time
     last_input_time = time.time()
     display_brightness(100)
-    if menu == 0:
-        while GPIO.input(button1_pin) == GPIO.LOW: # Button is still pressed.
-            time.sleep(.05)
-            if time.time() - time_button_press > .75:
-                print "Long button 1 press: accessing settings menu"
-                long_press = True
-                menu = 1
-                reset_graph_area(menu, shot_pouring)
-                refresh_temp_display(y, graph_top, graph_bottom, area_graph, area_text_temp)
-                time_menu = time.time()
-                n_item_selected = 0
-                display_main_menu()
-                while GPIO.input(button1_pin) == GPIO.LOW:
-                    if time.time() - time_menu > 1 and n_item_selected == 0 : # Stay longer (1 second) on the first selected item.
-                        n_item_selected = (n_item_selected + 1) % n
-                        display_main_menu()
-                        time_menu = time.time()
-                    elif time.time() - time_menu > .5 and n_item_selected > 0 : # Cycle faster (.5 sec for each item).
-                        n_item_selected = (n_item_selected + 1) % n
-                        display_main_menu()
-                        time_menu = time.time()
-                    time.sleep(.05)
-        if GPIO.input(button1_pin) == GPIO.HIGH and long_press == True:
-            select_menu_item()
-            return
-        elif GPIO.input(button1_pin) == GPIO.HIGH and long_press == False:
-            pass
     # All this works as expected, but need to rewrite the (cryptic) logic behind all these if statements.
     if submenu == 0:
         menu = 1-menu
@@ -1474,7 +1341,7 @@ def button2(channel):
         print "Probably a false positive button2 press"
         return
     print "Button 2 pressed"
-    global set_temp, shot_temp, n_item_selected, m_item_selected, target_weight, pp0, pp1, pp2, time_a, time_b, last_input_time, flow_mode, kP, kI, kD, k0
+    global set_temp, shot_temp, n_item_selected, m_item_selected, target_weight, pp0, pp1, pp2, ramp_up_time, last_input_time, flow_mode, kP, kI, kD, k0
     last_input_time = time.time()
     display_brightness(100)
 
@@ -1508,34 +1375,28 @@ def button2(channel):
                 pp2 += 1
             display_change_param("Pump Power P2:", int(pp2*10), "%")
         elif submenu == 6:
-            if time_a < 10:
-                time_a += 1
-                if time_a > time_b:
-                    time_b = time_a
-            display_change_param("Ramp-Up:", int(time_a), "s.")
-        elif submenu == 7:
-            if time_b < 10:
-                time_b += 1
-            display_change_param("Preinfusion:", int(time_b), "s.")
-        elif submenu == 9:
+            if ramp_up_time < 10:
+                ramp_up_time += 1
+            display_change_param("Preinfusion:", int(ramp_up_time), "s.")
+        elif submenu == 8:
             if flow_mode == "Manual":
                 flow_mode = "Auto"
             else:
                 flow_mode = "Manual"
             display_change_param("Flow Mode:", flow_mode, "")
-        elif submenu == 10:
+        elif submenu == 9:
             if kP < 0.20:
                 kP += .005
             display_change_param("PID: kP:", kP, "")
-        elif submenu == 11:
+        elif submenu == 10:
             if kI < 0.30:
                 kI += .01
             display_change_param("PID: kI:", kI, "")
-        elif submenu == 12:
+        elif submenu == 11:
             if kD < 4:
                 kD += .10
             display_change_param("PID: kD:", kD, "")
-        elif submenu == 13:
+        elif submenu == 12:
             if k0 < .06:
                 k0 += .005
             display_change_param("PID: k0:", k0, "")
@@ -1547,7 +1408,7 @@ def button3(channel):
         print "Probably a false positive button3 press"
         return
     print "Button 3 pressed"
-    global set_temp, shot_temp, n_item_selected, m_item_selected, target_weight, pp0, pp1, pp2, time_a, time_b, last_input_time, flow_mode, kP, kI, kD, k0
+    global set_temp, shot_temp, n_item_selected, m_item_selected, target_weight, pp0, pp1, pp2, ramp_up_time, last_input_time, flow_mode, kP, kI, kD, k0
     last_input_time = time.time()
     display_brightness(100)
 
@@ -1581,34 +1442,28 @@ def button3(channel):
                 pp2 -= 1
             display_change_param("Pump Power P2:", int(pp2*10), "%")
         elif submenu == 6:
-            if time_a > 0:
-                time_a -= 1
-            display_change_param("Ramp-Up:", int(time_a), "s.")
-        elif submenu == 7:
-            if time_b > 0:
-                time_b -= 1
-                if time_b < time_a:
-                    time_a = time_b
-            display_change_param("Preinfusion:", int(time_b), "s.")
-        elif submenu == 9:
+            if ramp_up_time > 0:
+                ramp_up_time -= 1
+            display_change_param("Preinfusion:", int(ramp_up_time), "s.")
+        elif submenu == 8:
             if flow_mode == "Manual":
                 flow_mode = "Auto"
             else:
                 flow_mode = "Manual"
             display_change_param("Flow Mode:", flow_mode, "")
-        elif submenu == 10:
+        elif submenu == 9:
             if kP > 0.00:
                 kP -= .005
             display_change_param("PID: kP:", kP, "")
-        elif submenu == 11:
+        elif submenu == 10:
             if kI > 0:
                 kI -= .01
             display_change_param("PID: kI:", kI, "")
-        elif submenu == 12:
+        elif submenu == 11:
             if kD > 0:
                 kD -= .10
             display_change_param("PID: kD:", kD, "")
-        elif submenu == 13:
+        elif submenu == 12:
             if k0 > 0:
                 k0 -= .005
             display_change_param("PID: k0:", k0, "")
@@ -1623,7 +1478,15 @@ def button4(channel):
     global shot_pouring, pump_power, end_shot_time, keep_reading_scale, steaming_on, set_temp, button4_repress, m_item_selected, n_item_selected, menu, submenu, backflush_on, flush_on, last_input_time
     last_input_time = time.time()
     display_brightness(100)
-    
+
+    # Check if button 4 is called from within a submenu
+    # This will change the behavior of button4: first button4 press: submenu is displayed; second button4 press: choice is selected.
+    if submenu == 1:
+        button4_repress = True
+    elif submenu == 0:
+        button4_repress = False
+        m_item_selected = 0
+
     if menu == 0: # Main menu
         if shot_pouring == True:
             end_shot()
@@ -1645,7 +1508,87 @@ def button4(channel):
             # but I don't know how to exit a thread remotely, from an outside function. thread.exit only works from the inside of the thread.
             # Make sure that each function called by thread.start_new_thread() has an if condition that ends with "return" when its job is done.
     elif menu == 1: # Settings menu
-        select_menu_item()
+        if n_item_selected % n == 0:
+            if flush_on == False:
+                flush_on = True
+                thread.start_new_thread(flush, ())
+                thread.start_new_thread(read_adc, ())
+                thread.start_new_thread(display_pump_power, ())
+            elif flush_on == True:
+                display_main_menu()
+                flush_on = False
+        # elif n_item_selected % n == 2:
+        #     # Steam
+        #     if (steaming_on == False):
+        #         ####### STEAMING DISABLED ######## THE TEMPERATURE SENSOR IS ONLY RATED FOR 125 CELSIUS
+        #         set_temp = shot_temp
+        #         steaming_on = False
+        #         # set_temp = steam_temp
+        #         # steaming_on = True
+        #     elif steaming_on == True:
+        #         set_temp = shot_temp
+        #         steaming_on = False
+        elif n_item_selected % n == 1: 
+            # This is the "Shut Down" choice.
+            submenu = 1
+            # Asking for confirmation
+            display_confirm_shutdown_menu()
+            if (button4_repress == True) and (m_item_selected % m == 0): 
+                shutdown()
+            elif (button4_repress == True) and (m_item_selected % m == 1):
+                submenu = 0
+                m_item_selected = 0
+                button4_repress = False
+                display_main_menu()
+                save_settings()
+                save_temperature_logs()
+        elif n_item_selected % n == 2:
+            submenu = 2
+            display_change_param("Target Weight:", int(target_weight), "g.")
+        elif n_item_selected % n == 3:
+            submenu = 3
+            display_change_param("Pump Power P0:", int(pp0*10), "%")
+        elif n_item_selected % n == 4:
+            submenu = 4
+            display_change_param("Pump Power P1:", int(pp1*10), "%")
+        elif n_item_selected % n == 5:
+            submenu = 5
+            display_change_param("Pump Power P2:", int(pp2*10), "%")
+        elif n_item_selected % n == 6:
+            submenu = 6
+            display_change_param("Preinfusion:", int(ramp_up_time), "s.")
+        elif n_item_selected % n == 7: 
+            # Backflush
+            if backflush_on == False:
+                thread.start_new_thread(backflush, ())
+            elif backflush_on == True:
+                backflush_on = False
+        elif n_item_selected % n == 8:
+            # Manual mode
+            submenu = 8
+            display_change_param("Flow Mode:", flow_mode, "")
+        elif n_item_selected % n == 9:
+            # kP
+            submenu = 9
+            display_change_param("PID: kP:", kP, "")
+        elif n_item_selected % n == 10:
+            # kI
+            submenu = 10
+            display_change_param("PID: kI:", kI, "")
+        elif n_item_selected % n == 11:
+            # kD
+            submenu = 11
+            display_change_param("PID: kD:", kD, "")
+        elif n_item_selected % n == 12:
+            # k0
+            submenu = 12
+            display_change_param("PID: k0:", k0, "")
+        elif n_item_selected % n == 13:
+            # Reset
+            reset_settings()
+        elif n_item_selected % n == 14:
+            # Reset
+            load_settings()
 
 
 ##################################
