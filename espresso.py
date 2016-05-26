@@ -33,6 +33,9 @@ from collections import deque
 
 # This redirects stdout to a file. 0 means no buffering. Each new line is redirected immediately.
 
+
+max_brightness = 50
+
 GPIO.setmode(GPIO.BCM)
 
 button1_pin = 17
@@ -148,7 +151,7 @@ shot_pouring = False
 old_shot_pouring = False
 seconds_elapsed = 0.0
 
-end_shot_time = time.time()-10
+end_shot_time = 0.0
 keep_reading_scale = False
 
 menu = 0 # Other options: 0 = main menu; 1 = settings menu
@@ -161,13 +164,15 @@ flush_on = False
 old_flush_on = False
 
 def load_settings():
-    global set_temp, target_weight, time_a, time_b, pp0, pp1, pp2, kP, kI, kD, k0
+    global set_temp, target_weight, time_a, time_b, pp0, pp1, pp2, kP, kI, kD, k0, profile_0a, profile_ab
     try:
         settings = json.load(open("/home/pi/settings.txt","r"))
         set_temp = settings["set_temp"]
         target_weight = settings["target_weight"]
         time_a = settings["time_a"]
         time_b = settings["time_b"]
+        profile_0a = settings["profile_0a"]
+        profile_ab = settings["profile_ab"]
         pp0 = settings["pp0"]
         pp1 = settings["pp1"]
         pp2 = settings["pp2"]
@@ -179,11 +184,13 @@ def load_settings():
         reset_settings()
 
 def reset_settings():
-    global set_temp, target_weight, time_a, time_b, pp0, pp1, pp2, kP, kI, kD, k0
+    global set_temp, target_weight, time_a, time_b, pp0, pp1, pp2, kP, kI, kD, k0, profile_0a, profile_ab
     set_temp = 90
     target_weight = 32
     time_a = 3
     time_b = 8
+    profile_0a = "Flat"
+    profile_ab = "Flat"
     pp0 = 5
     pp1 = 1
     pp2 = 7
@@ -225,33 +232,11 @@ filtered_time = []
 # With a refresh speed of 0.5 seconds, 3600 data points = 30 minutes of temperature logging. Perhaps overkill.
 # Making sure that y starts with a length of 3, so that the PID function can be run right after read_temp.
 
-trigger_refresh_temp_display = False
+trigger_refresh_graph = False
 trigger_heat = False
 trigger_refresh_timer = False
 filter_on = False
 
-####################################
-# UI area positions and dimensions #
-####################################
-
-# Screen resolution is 320 * 240.
-# Careful here: pygame.Rect uses these coordinates for rectangles: (left, top, width, height) [not (left, top, right, bottom)]
-area_graph = ((0,65),(290,155))
-# This is the reduced-size graph window, used when pulling a shot or entering the settings menu.
-# area_graph = ((0,100),(140,100)) # Note that we need to change npixels_per_tempreading
-area_text_temp = ((0,0),(160,60)) # same here, for the refresh_temp_display function.
-area_timer = ((160,0),(120,60))   # same for the refresh_timer_display
-area_icons =((295,0),(25,240))
-area_belowgraph = ((0,220), (280, 20))
-area_menu = ((150, 65), (130, 155))
-
-min_range = 5
-graph_top = area_graph[0][1]
-graph_bottom = area_graph[0][1] + area_graph[1][1] 
-graph_left  = area_graph[0][0]
-graph_right = area_graph[0][0] + area_graph[1][0] 
-
-npixels_per_tempreading = 2
 
 #################################################################################################
 # Functions defining actions triggered by buttons (e.g. pour_shot) or automatically (e.g. heat) #
@@ -299,7 +284,7 @@ def pid(y, set_temp):
 def adjust_heating_power():
     global power, post_shot, length_history
     if heat_cycles < 3.5*60/0.79 and start_temp < 50:
-        early_boost = 100 - set_temp # For the first 3.5 minutes, if the machine starts cold, set_temp will be boosted up to 100 degrees. The machine will warm up faster to set_temp.
+        early_boost = 101 - set_temp # For the first 3.5 minutes, if the machine starts cold, set_temp will be boosted up to 101 degrees. The machine will stabilize faster around set_temp.
     else:
         early_boost = 0
     if shot_pouring == False:
@@ -517,11 +502,13 @@ def pour_shot():
     # This function will be run in its own thread
     print "pour_shot thread started"
     # Remember to open the 3-way valve here.
-    global pump_power, shot_pouring, end_shot_time, trigger_update_log_shot, flow_per_second, predicted_end_time, current_time, dt, keep_reading_pot, trigger_refresh_display_pump
+    global pump_power, shot_pouring, end_shot_time, trigger_update_log_shot, flow_per_second, predicted_end_time, current_time, dt, keep_reading_pot, trigger_refresh_display_pump, last_adjust, log_shot
     if flow_mode == "Manual":
         keep_reading_pot = True
         thread.start_new_thread(read_pot, ())
     time.sleep(time_preheat+.5)
+    log_shot = True
+    thread.start_new_thread(update_log_shot, ())
     last_adjust = 0.0
     pump_power = 0
     previous_pump_power = -1
@@ -532,9 +519,9 @@ def pour_shot():
         
         if flow_mode == "Auto":    
             
-            # Simple case: no time_b. Just apply full power 
+            # Simple case: no time_b. Just apply pp2 
             
-            if (time_b == 0) and (seconds_elapsed < 12) and (filtered_weight <= 2):
+            if (time_b == 0) and (seconds_elapsed < 12) and (filtered_weight <= 1):
                 # print "Case 0 - no time_a"
                 pump_power = clip(int(pp2), 1, 10)
                 if (seconds_elapsed - last_adjust >= 1):
@@ -542,19 +529,25 @@ def pour_shot():
                     last_adjust = seconds_elapsed
             # First stage of the shot: pump power ramps up from pp0 to pp1 over ramp up time, then stays at pp1 until the end of preinfusion, then changes to pp2.
             # But only as long as weight <= 2 grams and time < 12 seconds. Otherwise, pump_power is set according to the rules for Stage 2 of the shot
-            elif (seconds_elapsed <= time_a) and (seconds_elapsed < 12) and (filtered_weight <= 2):
+            elif (seconds_elapsed <= time_a) and (seconds_elapsed < 12) and (filtered_weight <= 1):
                 # print "Case 1 - BEFORE time_a (unless weight/time hits 2g or 12 sec.): ramping up from pp0 to pp1"
-                pump_power = int(clip(seconds_elapsed/time_a * (pp1 - pp0) + pp0, 1, 10)) # increase pump power continuously during time_a.
+                if profile_0a == "Flat":
+                    pump_power = int(clip(pp0, 1, 10))
+                else:
+                    pump_power = int(clip(seconds_elapsed/time_a * (pp1 - pp0) + pp0, 1, 10)) # increase pump power continuously during time_a.
                 if (pump_power != previous_pump_power):
                     trigger_update_log_shot = True
                     last_adjust = seconds_elapsed
-            elif (seconds_elapsed > time_a) and (seconds_elapsed < time_b) and (seconds_elapsed < 12) and (filtered_weight <= 2) :
+            elif (seconds_elapsed > time_a) and (seconds_elapsed < time_b) and (seconds_elapsed < 12) and (filtered_weight <= 1) :
                 # print "Case 2 - BETWEEN time_a and time_b (unless weight/time hits 2g or 12 sec.): hold pp1"
-                pump_power = int(clip(pp1, 1, 10))
+                if profile_ab == "Flat":
+                    pump_power = int(clip(pp1, 1, 10))
+                else:
+                    pump_power = int(clip((seconds_elapsed - time_a)/(time_b - time_a) * (pp2 - pp1) + pp1, 1, 10))
                 if (pump_power != previous_pump_power) or (time.time()-last_log_time >= 1):
                     trigger_update_log_shot = True
                     last_adjust = seconds_elapsed
-            elif (seconds_elapsed >= time_b) and (seconds_elapsed < 12) and (filtered_weight <= 2) :
+            elif (seconds_elapsed >= time_b) and (seconds_elapsed < 12) and (filtered_weight <= 1) :
                 # print "Case 3 - AFTER time_b (unless weight/time hits 2g or 12 sec.): hold pp2"
                 pump_power = int(clip(pp2, 1, 10))
                 if (pump_power != previous_pump_power) or (time.time()-last_log_time >= 1):
@@ -684,50 +677,62 @@ def update_log_shot():
 def time_shot():
     # This function will be run in its own thread
     # print "time_shot thread started"
-    global seconds_elapsed, trigger_refresh_timer, log_shot, start_shot_time
+    global seconds_elapsed, start_shot_time
     time.sleep(time_preheat+.5)
-    log_shot = True
     start_shot_time = time.time()
-    thread.start_new_thread(update_log_shot, ())
     while shot_pouring == True:
         seconds_elapsed = math.floor((time.time() - start_shot_time)*10)/10
-        trigger_refresh_timer = True
+        refresh_timer_display()
         time.sleep(.1)
     # Make sure that the thread can exit
     if shot_pouring == False:
         # print "time_shot thread exited"
         return
+        
+# Several problems with time_shot():
+# this function does too much. but it is not a good timer: "seconds_elapsed" is inaccurate: even if time.time() - start_shot_time = 12.199, seconds_elapsed = 12.1.
+# Most of what the function does should be called directly by pour_shot. 
+# seconds_elapsed can only be used for display. for filtering calculations, pump power, logs, each function needs to call time.time() when it needs to.
+
 
 def end_shot():
-    global end_shot_time, shot_pouring, pump_power, post_shot
+    global end_shot_time, shot_pouring, pump_power, post_shot, display_end_shot_line_now
     end_shot_time = time.time()
     shot_pouring = False
     pump_power = 0
     GPIO.output(pump_pin, 0)
+    display_end_shot_line_now = True
     post_shot = True
     # Remember to close the 3-way valve here.
     thread.start_new_thread(wait_after_shot_and_refresh, ())
+    refresh_buttons()
 
 last_log_time = time.time()
 
 def wait_after_shot_and_refresh():
-    global trigger_refresh_temp_display, keep_reading_scale, last_weight, last_timer, log_shot, trigger_update_log_shot, current_time, filter_on
+    global trigger_refresh_graph, keep_reading_scale, last_weight, last_timer, log_shot, trigger_update_log_shot, current_time, filter_on, seconds_elapsed, filtered_weight
     while time.time() - end_shot_time < 6:
         if time.time() - last_log_time >= .5:
             current_time = time.time() - start_script_time
             trigger_update_log_shot = True
         time.sleep(.02)
     if time.time() - end_shot_time >= 6:
+        temp_surface = lcd.subsurface(((27, 70), (253, 150)))
+        pygame.image.save(temp_surface, "/home/pi/lastshot.png")
+        # pygame.image.save(temp_surface, "/home/pi/lastshot.png")
         reset_graph_area(menu, shot_pouring)
         lcd.fill(col_background, area_timer)
         pygame.display.update(area_timer)
-        refresh_temp_display(y, graph_top, graph_bottom, area_graph, area_text_temp)
-        trigger_refresh_temp_display = True
+        refresh_graph(y, graph_top, graph_bottom, area_graph, area_text_temp)
+        trigger_refresh_graph = True
         keep_reading_scale = False
         last_weight = current_weight
         last_timer = seconds_elapsed
         log_shot = False
         filter_on = False
+        seconds_elapsed = 0.0
+        filtered_weight = 0.0
+        refresh_buttons()
         return
 
 # def try_it(f):
@@ -751,6 +756,30 @@ def wait_after_shot_and_refresh():
 # DISPLAY INFO / MENUS ON THE SCREEN #
 ######################################
 
+####################################
+# UI area positions and dimensions #
+####################################
+
+# Screen resolution is 320 * 240.
+# Careful here: pygame.Rect uses these coordinates for rectangles: (left, top, width, height) [not (left, top, right, bottom)]
+area_graph = ((0,65),(290,155))
+# This is the reduced-size graph window, used when pulling a shot or entering the settings menu.
+# area_graph = ((0,65),(150,155))
+area_text_temp = ((0,0),(160,60)) # same here, for the refresh_graph function.
+area_timer = ((160,0),(120,60))   # same for the refresh_timer_display
+area_icons =((295,0),(25,240))
+area_belowgraph = ((0,220), (280, 20))
+area_menu = ((150, 65), (130, 155))
+
+min_range = 5
+graph_top = area_graph[0][1]
+graph_bottom = area_graph[0][1] + area_graph[1][1] 
+graph_left  = area_graph[0][0]
+graph_right = area_graph[0][0] + area_graph[1][0] 
+
+npixels_per_tempreading = 2
+
+
 # Setting up the screen 
 
 
@@ -758,19 +787,24 @@ os.putenv('SDL_FBDEV', '/dev/fb1')
 pygame.display.init()
 pygame.font.init()
 pygame.mouse.set_visible(False)
-lcd = pygame.display.set_mode((320, 240))
-# lcd = pygame.display.set_mode((320, 240),0, 24)
+# lcd = pygame.display.set_mode((320, 240))
+# 24 bit depth required to use anti-aliasing
+lcd = pygame.display.set_mode((320, 240),0, 24)
 
 col_lightblue = (0,191,255)
 col_orange = (255,165,0)
 col_lightgreen = (124,252,0)
 col_red = (255,0,0)
 col_white = (255,255,255)
+col_veryverydarkgrey = (48,48,48)
 col_verydarkgrey = (64,64,64)
 col_darkgrey = (128,128,128)
 col_medgrey = (192,192,192)
 col_lightgrey = (224,224,224)
 col_black = (0,0,0)
+col_lightred = (153,0,76)
+col_yellow = (255,255,0)
+col_darkred = (204,0,0)
 
 col_background = col_black
 col_text = col_lightblue
@@ -839,9 +873,9 @@ def draw_lines(y_coord, y_axis, graph_top, graph_bottom, color_series):
     # pointlist = [[graph_left + npixels_per_tempreading*j for j in range(0, len(y_coord))],
     #              [y_coord[j] for j in range(0, len(y_coord))]]
     # pointlist = [[pointlist[0][i],pointlist[1][i]] for i in range(0, len(y_coord))]
-    # pygame.draw.aalines(lcd, col_white, False, pointlist) # does anti-aliasing still work?.
+    # pygame.draw.aalines(lcd, col_white, False, pointlist) 
     for j in xrange(1, len(y_coord)):
-        pygame.draw.line(lcd, color_series[j-1], (graph_left + npixels_per_tempreading*(j-1), y_coord[j-1]),(graph_left + npixels_per_tempreading*j, y_coord[j]))
+        pygame.draw.aaline(lcd, color_series[j-1], (graph_left + npixels_per_tempreading*(j-1), y_coord[j-1]),(graph_left + npixels_per_tempreading*j, y_coord[j]), 0)
 
 # def draw_lines(subset_y, y_axis, tick, graph_top, graph_bottom, color_series):
 #     coord_set_temp = coordinates(y_axis, set_temp, graph_top, graph_bottom)
@@ -863,102 +897,57 @@ def draw_power(power_data):
     for j in xrange(0, len(power_data)):
         pygame.draw.line(lcd, col_orange, (graph_left+npixels_per_tempreading*j, 220), (graph_left+npixels_per_tempreading*j, int(220-power_data[j]/4)),1)
 
-j = 0
 
-def draw_belowgraph():
-    global j
-    string1 = "T: " + str(set_temp) + u"\u2103" + "  -  H: " 
-    display_text(string1, area_belowgraph[0], 25, col_text)
-    string2 = str(int(power)) + "%  -"
-    surf = pygame.font.Font(None, 25).render(string2, True, col_white)
-    width = surf.get_width()
-    display_text(string2, (100+59-width, area_belowgraph[0][1]), 25, col_text)
-    if steaming_on == True:
-        string3 = "  -  Steam"
-    if steaming_on == False:
-        # Update the rest of the display only every 2 refreshes
-        if (j % 14 < 2): # 0-1
-            if time.time() - last_input_time < 2700: # If time.time() - last_input_time >= 2700, the system should either shutdown OR should be detecting that NTPD has reset time (in which case "On time" will be off for less than 5 seconds -- until thread_auto_dim_or_shutdown() reajusts start_script_time and last_input_time)
-                minutes = int((time.time() - start_script_time)/60)
-                string3 = "On: %s min." %(minutes)
-            else:
-                string3 = "Target: %s g." %(target_weight)
-        elif (j % 14 < 4): # 2-3
-            string3 = "Target: %s g." %(target_weight)
-        else:
-            if flow_mode == "Auto":
-                if (j % 14 < 6): # 4-5
-                    string3 = "Flow: Auto"
-                elif (j % 14 < 8): # 6-7
-                    pump0 = int(pp0*10)
-                    pump1   = int(pp1*10)
-                    string3 = "Preinf: %s-%s%%" %(pump0, pump1)
-                elif (j % 14 < 10): # 8-9
-                    string3 = "Preinf: %ss." %(time_b)
-                elif (j % 14 < 12): # 10-11
-                    string3 = "Ramp-Up: %ss." %(time_a)
-                elif (j % 14 < 14): # 12-13
-                    peak_pump = int(pp2*10)
-                    string3 = "Peak: %s%%" %(peak_pump)
-            elif flow_mode == "Manual": # 4 or 9
-                string3 = "Flow: Manual"
-                j += 4
-        j += 1
-    display_text(string3, (165, area_belowgraph[0][1]), 25, col_text)
-
-
-def refresh_timer_display(seconds_elapsed, area_timer):
-    lcd.fill(col_background, rect = area_timer)
-    display_text("%4s" % '{0:.1f}'.format(seconds_elapsed) + "s", (175, 5), 60, col_text)
-    # display_text('{:>8}'.format(str(seconds_elapsed) + "s."), (180, 5), 60, col_text)
-    #display_text(str(seconds_elapsed)+" s.", (180, 5), 70, col_text)
-    pygame.display.update(area_timer)
 
 # prev_y_axis = (0, 0)
 # y_minmax = (65, 215)
 # prev_y_minmax = (0, 0)
 
-def refresh_temp_display(y, graph_top, graph_bottom, area_graph, area_text_temp):
+def refresh_graph(y, graph_top, graph_bottom, area_graph, area_text_temp):
     global prev_y_axis, prev_y_minmax, prev_x_range
     # Transform the series of 150 most recent ys into coordinates on the screen
-    n_datapoints = int(math.floor((graph_right-30-graph_left)/npixels_per_tempreading))
-    subset_y = [y[k] for k in xrange(max(0, len(y)-n_datapoints), len(y))]
-    subset_heat_series = [heat_series[k] for k in xrange(max(0, len(heat_series)-n_datapoints), len(heat_series))]
-    subset_shot_series = [shot_series[k] for k in xrange(max(0, len(shot_series)-n_datapoints), len(shot_series))]
-    color_series = [col_red if whatshappening else col_white for whatshappening in subset_shot_series]
-    # Find the range of y to be plotted, the tick marks, and draw.
-    y_axis = axis_min_max(subset_y)
-    y_coord  = [coordinates(y_axis, subset_y[j], graph_top, graph_bottom-25) for j in xrange(0, len(subset_y))]
-    # y_minmax = (int(min(y_coord)), int(max(y_coord)))
-    tick = BestTick(y_axis[1]-y_axis[0])
-    # Erase the areas to be updated
-    # if y_axis == prev_y_axis and area_graph[1][0] == prev_x_range:
-    #     # Redraw only a subset of area_graph if y_axis hasn't changed.
-    #     area_graph_reduced = ((0, min(y_minmax[0], prev_y_minmax[0]) - 2 ),
-    #                           (area_graph[1][0], 5 + max(y_minmax[1], prev_y_minmax[1]) - min(y_minmax[0], prev_y_minmax[0])))
-    # else:
-    #     area_graph_reduced = area_graph
-    lcd.fill(col_background, rect = area_graph)
-    # lcd.fill(col_background, rect = area_graph_reduced)
     lcd.fill(col_background, rect = area_timer)
     lcd.fill(col_background, rect = area_text_temp)
     lcd.fill(col_background, rect = area_belowgraph)
-    # lcd.fill(col_background, rect = ((0,195),(area_graph[1][0], 25)))
-    draw_power(subset_heat_series)
-    draw_axes(y_axis, tick, graph_top, graph_bottom-25)
-    draw_lines(y_coord, y_axis, graph_top, graph_bottom-25, color_series)
+    if submenu not in range(3, 10) and n_item_selected % n not in range(3, 10) and keep_reading_scale == False:
+        n_datapoints = int(math.floor((graph_right-30-graph_left)/npixels_per_tempreading))
+        subset_y = [y[k] for k in xrange(max(0, len(y)-n_datapoints), len(y))]
+        subset_heat_series = [heat_series[k] for k in xrange(max(0, len(heat_series)-n_datapoints), len(heat_series))]
+        subset_shot_series = [shot_series[k] for k in xrange(max(0, len(shot_series)-n_datapoints), len(shot_series))]
+        color_series = [col_red if whatshappening else col_white for whatshappening in subset_shot_series]
+        # Find the range of y to be plotted, the tick marks, and draw.
+        y_axis = axis_min_max(subset_y)
+        y_coord  = [coordinates(y_axis, subset_y[j], graph_top, graph_bottom-25) for j in xrange(0, len(subset_y))]
+        # y_minmax = (int(min(y_coord)), int(max(y_coord)))
+        tick = BestTick(y_axis[1]-y_axis[0])
+        # Erase the areas to be updated
+        # if y_axis == prev_y_axis and area_graph[1][0] == prev_x_range:
+        #     # Redraw only a subset of area_graph if y_axis hasn't changed.
+        #     area_graph_reduced = ((0, min(y_minmax[0], prev_y_minmax[0]) - 2 ),
+        #                           (area_graph[1][0], 5 + max(y_minmax[1], prev_y_minmax[1]) - min(y_minmax[0], prev_y_minmax[0])))
+        # else:
+        #     area_graph_reduced = area_graph
+        lcd.fill(col_background, rect = area_graph)
+        # lcd.fill(col_background, rect = area_graph_reduced)
+        # lcd.fill(col_background, rect = ((0,195),(area_graph[1][0], 25)))
+        draw_power(subset_heat_series)
+        draw_axes(y_axis, tick, graph_top, graph_bottom-25)
+        draw_lines(y_coord, y_axis, graph_top, graph_bottom-25, color_series)
     if keep_reading_scale == False:
         draw_belowgraph()
-        if subset_y[-1] >= 100:
-            display_text(str(int(round(subset_y[-1]))) + u"\u2103", (5, 5), 60, col_text)
-        elif subset_y[-1] < 100:
-            display_text('{0:.1f}'.format(subset_y[-1]) + u"\u2103", (5, 5), 60, col_text) # u"\u2103" is the unicode degrees celsisus sign.
+        if y[-1] >= 100:
+            display_text(str(int(round(y[-1]))) + u"\u2103", (5, 5), 60, col_text)
+        elif y[-1] < 100:
+            display_text('{0:.1f}'.format(y[-1]) + u"\u2103", (5, 5), 60, col_text) # u"\u2103" is the unicode degrees celsisus sign.
         if (last_weight != 0) and (last_timer != 0):
             display_text("Last shot", (180, 8), 25, col_text)
             display_text("%0.0f s. / %0.0f g." %(last_timer, last_weight), (180, 26), 25, col_text)
-        pygame.display.update([area_graph, area_belowgraph, area_text_temp, area_timer])
+        for rect in [area_graph, area_belowgraph, area_text_temp, area_timer]:
+            pygame.display.update(rect)
     else:
-        pygame.display.update([area_graph, area_belowgraph])
+        return
+        # draw_belowgraph()
+        # pygame.display.update(area_belowgraph)
     # prev_y_axis = y_axis
     # prev_y_minmax = y_minmax
     # prev_x_range = area_graph_reduced[1][0]
@@ -974,9 +963,75 @@ icon_settings = pygame.image.load(os.path.join('/home/pi/icons', 'settings.png')
 icon_check = pygame.image.load(os.path.join('/home/pi/icons', 'check.png'))
 icon_back = pygame.image.load(os.path.join('/home/pi/icons', 'back.png'))
 icon_stop = pygame.image.load(os.path.join('/home/pi/icons', 'stop.png'))
+icon_next = pygame.image.load(os.path.join('/home/pi/icons', 'next.png'))
 
-def draw_buttons(menu, shot_pouring, steaming_on, backflush_on, flush_on):
-    # Buttons will look different depending on menu and whether steam_mode is selected, or steaming is started.
+def display_profile_graph():
+    area_graph = ((0,65),(150,155))
+    points = [(0, pp0)]
+    if profile_0a == "Flat":
+        points.append((time_a, pp0))
+        points.append((time_a, pp1))
+    else:
+        points.append((time_a, pp1))
+    if profile_ab == "Flat":
+        points.append((time_b, pp1))
+        points.append((time_b, pp2))
+    else:
+        points.append((time_b, pp2))
+    points.append((12, pp2))
+    vlines = range(0, 13)
+    hlines = range(0, 11)
+    coord_points = []
+    x0 = 15
+    x1 = 135
+    y0 = 80
+    y1 = 180
+    lcd.fill(col_black, rect = area_graph)
+    for i in range(0, len(vlines)):
+        x = 10 * vlines[i] + x0
+        pygame.draw.line(lcd, col_verydarkgrey, (x, y0), (x, y1))
+    for i in range(0, len(hlines)):
+        y = 10 * vlines[i] + y0
+        pygame.draw.line(lcd, col_verydarkgrey, (x0 ,y), (x1 ,y))
+    for i in range(0, len(points)):
+        # linear transformation into coordinates
+        x = 10 * points[i][0] + x0 
+        y = 10 * (10 - points[i][1]) + y0
+        coord_points.append((x, y))
+    pygame.draw.lines(lcd, col_white, False, coord_points)
+    if n_item_selected % n == 3:
+        # Pump P0
+        pygame.draw.line(lcd, col_red, (x0, y1), (x0, y1 - 10 * pp0))
+        pygame.draw.circle(lcd, col_red, (x0, y1 - 10 * pp0), 3)
+    if n_item_selected % n == 4:
+        # Pump P1
+        pygame.draw.line(lcd, col_red, (x0 + 10 * time_a, y1), (x0 + 10 * time_a, y1 - 10 * pp1))
+        pygame.draw.circle(lcd, col_red, (x0 + 10 * time_a, y1 - 10 * pp1), 3)
+    if n_item_selected % n == 5:
+        # Pump P2
+        pygame.draw.line(lcd, col_red, (x0 + 10 * time_b, y1), (x0 + 10 * time_b, y1 - 10 * pp2))
+        pygame.draw.circle(lcd, col_red, (x0 + 10 * time_b, y1 - 10 * pp2), 3)
+    if n_item_selected % n == 6:
+        # Time T1
+        pygame.draw.line(lcd, col_red, (x0, y1), (x0 + 10 * time_a, y1))
+        pygame.draw.circle(lcd, col_red, (x0 + 10 * time_a, y1), 3)
+    if n_item_selected % n == 7:
+        # Time T2
+        pygame.draw.line(lcd, col_red, (x0, y1), (x0 + 10 * time_b, y1))
+        pygame.draw.circle(lcd, col_red, (x0 + 10 * time_b, y1), 3)
+    if n_item_selected % n == 8:
+        # Profile 0-T1
+        pygame.draw.circle(lcd, col_red, (x0 + 10 * time_a, y1 - 10 * pp1), 3)
+        pygame.draw.circle(lcd, col_red, (x0, y1 - 10 * pp0), 3)
+    if n_item_selected % n == 9:
+        # Profile T1-T2
+        pygame.draw.circle(lcd, col_red, (x0 + 10 * time_a, y1 - 10 * pp1), 3)
+        pygame.draw.circle(lcd, col_red, (x0 + 10 * time_b, y1 - 10 * pp2), 3)
+    pygame.display.update(area_graph)
+    
+
+def refresh_buttons():
+    lcd.fill(col_background, rect = area_icons)
     if menu == 0:
         if shot_pouring == True:
             lcd.blit(icon_stop, (295, 216))
@@ -986,27 +1041,19 @@ def draw_buttons(menu, shot_pouring, steaming_on, backflush_on, flush_on):
             lcd.blit(icon_down, (295, 156))
             lcd.blit(icon_start, (295, 216))
     elif menu == 1:
-        if (steaming_on == True) or (backflush_on == True) or (flush_on == True):
-            lcd.blit(icon_stop, (295, 216))
+        if ((steaming_on == True) or (backflush_on == True) or (flush_on == True)) and (submenu not in range(3, 10)):
+            lcd.blit(icon_stop, (290, 216))
+        elif submenu in range(3, 9):
+            lcd.blit(icon_back, (295, 36))
+            lcd.blit(icon_up, (295, 96))
+            lcd.blit(icon_down, (295, 156))
+            lcd.blit(icon_next, (295, 216))
         else:
             lcd.blit(icon_back, (295, 36))
             lcd.blit(icon_up, (295, 96))
             lcd.blit(icon_down, (295, 156))
             lcd.blit(icon_check, (295, 216))
-
-def refresh_buttons(menu, shot_pouring, steaming_on, backflush_on, flush_on):
-    # Same as time: only refresh if something changes.
-    global old_menu, old_set_temp, old_shot_pouring, old_steaming_on, old_backflush_on, old_flush_on
-    if (menu != old_menu) or (shot_pouring != old_shot_pouring) or (steaming_on != old_steaming_on) or (backflush_on != old_backflush_on) or (flush_on != old_flush_on):
-        # print "Refreshing button icons"
-        lcd.fill(col_background, rect = area_icons)
-        draw_buttons(menu, shot_pouring, steaming_on, backflush_on, flush_on)
-        pygame.display.update(area_icons)
-        old_menu = menu
-        old_shot_pouring = shot_pouring
-        old_steaming_on = steaming_on
-        old_backflush_on = backflush_on
-        old_flush_on = flush_on
+    pygame.display.update(area_icons)
 
 def reset_graph_area(menu, shot_pouring):
     global area_graph, graph_top, graph_bottom, graph_left, graph_right, npixels_per_tempreading
@@ -1029,27 +1076,271 @@ def reset_graph_area(menu, shot_pouring):
 
 trigger_refresh_display_pump = False
 
+def refresh_timer_display():
+    lcd.fill(col_background, rect = area_timer)
+    display_text("%4s" % '{0:.1f}'.format(seconds_elapsed) + "s", (175, 5), 60, col_text)
+    pygame.display.update(area_timer)
+
 def display_pump_power():
     global trigger_refresh_display_pump
     trigger_refresh_display_pump = True
-    while (keep_reading_scale == True) or (flush_on == True):
+    while (keep_reading_scale == True) or (flush_on == True): # "keeps_reading_scale, not shot_pouring, to make sure that pump power is also displayed during taring/preheat phase, when the scale is used, but the shot is not yet pouring"
         if trigger_refresh_display_pump:
             print "Pump power: %s" %(pump_power)
-            # print "display pump power update"
-            lcd.fill(col_background, rect = (150, 65, 130, 155))
-            display_text("Pump", (200, 180), 25, col_text)
-            display_text(str(pump_power*10) + "%", (202 if pump_power == 10 else 206, 200), 25, col_text)
-            for box in range(1, 11):
-                lcd.fill(col_verydarkgrey, rect= ((215, 170-(box-1)*10), (20, 8)))
-            for box in range(1, pump_power + 1):
-                lcd.fill(col_lightblue, rect= ((215, 170-(box-1)*10), (20, 8)))
-            # pygame.display.update((200, 65, 70, 155))
-            pygame.display.update((150, 65, 130, 155))
-            trigger_refresh_display_pump = False
+            if flush_on:
+                area_pump_display = (150, 65, 130, 155)
+                lcd.fill(col_background, rect = area_pump_display)
+                display_text("Pump", (200, 180), 25, col_text)
+                display_text(str(pump_power*10) + "%", (202 if pump_power == 10 else 206, 200), 25, col_text)
+                for box in range(1, 11):
+                    lcd.fill(col_verydarkgrey, rect= ((215, 170-(box-1)*10), (20, 8)))
+                for box in range(1, pump_power + 1):
+                    lcd.fill(col_lightblue, rect= ((215, 170-(box-1)*10), (20, 8)))
+                pygame.display.update(area_pump_display)
+                trigger_refresh_display_pump = False
+            if keep_reading_scale:
+                area_pump_display = (0, 65, 26, 155)
+                lcd.fill(col_background, rect = area_pump_display)
+                display_text("P", (9, 199), 20, col_text)
+                # display_text(str(pump_power*10) + "%", (282 if pump_power == 10 else 285, 187), 20, col_text)
+                for box in range(1, 11):
+                    lcd.fill(col_verydarkgrey, rect= ((5, 186-(box-1)*11), (17, 8)))
+                for box in range(1, pump_power + 1):
+                    lcd.fill(col_lightblue, rect= ((5, 186-(box-1)*11), (17, 8)))
+                draw_belowgraph()
+                pygame.display.update(area_pump_display)
+                pygame.display.update(area_belowgraph)
+                trigger_refresh_display_pump = False
         time.sleep(.05)
     if (keep_reading_scale == False) and (flush_on == False):
         # print "Exiting display pump power thread"
         return
+
+display_end_shot_line_now = False
+
+# Load all_values from a json file, and save into json file on shutdown
+try: 
+    all_values = json.load(open("/home/pi/lastshot.json","r"))["all_values"]
+except:
+    all_values = {"w_pointlist": [], "x_endshot": 0, "target_weight": target_weight} 
+
+def display_weight_graph():
+    global display_end_shot_line_now, all_values
+    lcd.fill(col_black, area_belowgraph)
+    draw_belowgraph()
+    pygame.display.update(area_belowgraph)
+    # Axes and text
+    x0 = 35
+    x1 = 280
+    # Push x1 a bit to the left to add a pressure display?
+    y0 = 70
+    y1 = 194
+    lcd.fill(col_black, rect = ((26, y0), (280-26, 220 - y0)))
+    max_w = target_weight*1.158887 # make sure that max_w line ends up at line 87, aligned with top of the upper rectangle of pump power.
+    max_t = 40.0
+    min_w = 0.0
+    min_t = 0.0
+    a = (x1 - x0)/(max_t - min_t)
+    b = -(y1 - y0)/(max_w - min_w)
+    target_y =  int(round(b * (target_weight - min_w) + y1))
+    # TICK MARKS FOR DESIRED END SHOT TIME WINDOW (30 - 33s)
+    pygame.draw.line(lcd, col_orange, (int(round(a*30) + x0), target_y - 3), (int(round(a*30) + x0), target_y + 3))
+    pygame.draw.line(lcd, col_orange, (int(round(a*33) + x0), target_y - 3), (int(round(a*33) + x0), target_y + 3))
+    # DRAW PREVIOUS SHOT WEIGHT CURVE AND END SHOT VERTICAL LINE
+    if all_values["w_pointlist"] != [] and all_values["target_weight"] == target_weight:
+        lastshot_values = all_values
+        pygame.draw.lines(lcd, col_darkgrey, False, lastshot_values["w_pointlist"])
+        if all_values["x_endshot"] != 0:
+            for i in range(y0, y1, 5):
+                lcd.set_at((int(round(all_values["x_endshot"])), i), col_darkgrey)
+    # X AXIS, WITH TICK MARKS FOR TIME AND CENTERED LABELS 
+    vlines = range(0, int(max_t + 1), 10)
+    pygame.draw.line(lcd, col_lightblue, (x0, y1), (x1, y1))
+    for i in range(0, len(vlines)):
+        x = int(a * (vlines[i] - min_t) + x0)
+        pygame.draw.line(lcd, col_lightblue, (x, y1 + 3), (x, y1))
+        if vlines[i] != max_t:
+            string = str(vlines[i]) + "s"
+            width = pygame.font.Font(None, 20).render(string, True, (0,0,0)).get_width()
+            display_text(str(vlines[i]) + "s", (x - width/2, y1 + 5), 20, col_lightblue)
+    # HORIZONTAL LINE FOR TARGET WEIGHT, WITH CENTERED LABEL
+    pygame.draw.line(lcd, col_orange, (x0, target_y), (x1, target_y))
+    string_target_weight = str(target_weight) + "g"
+    width = pygame.font.Font(None, 20).render(string_target_weight, True, (0,0,0)).get_width()
+    display_text(string_target_weight, (int((x0 + x1)/2 - width/2), target_y - 19), 20, col_orange)
+    pygame.display.update(((26, y0), (280-26, 220-y0)))
+    last_x = x0
+    last_y_weight = y1
+    last_y_flow = y1
+    last_update_weight_graph = time.time()
+    old_predicted_end_time = 0
+    x_pred = 0
+    all_values = {"target_weight": target_weight, "w_pointlist": [], "x_endshot": 0}
+    while keep_reading_scale:
+        if time.time() - last_update_weight_graph >= .17 and seconds_elapsed > 0:
+            time_now = time.time() - start_shot_time
+            last_update_weight_graph = time.time()
+            changed_areas = []
+            new_x = int(round(a * (time_now - min_t) + x0))
+            new_y_weight = clip(int(round(b * (filtered_weight - min_w) + y1)), y0, y1)
+            new_y_flow = clip(int(round(-(y1 - y0)/(3.5/.6)*flow_smooth) + y1), y0, y1) # Range is 0-3.5 g/s = 60% of the range of the y axis
+            if new_x >= last_x + 1 and new_x <= x1:
+                # Restore background surfaces where things just moved.
+                if x_pred != 0:
+                    lcd.blit(background_dotpred, (x_pred-2, y_pred-2), ((0,0),(5, 5)))
+                    changed_areas.append(((x_pred-2, y_pred-2), (5, 5)))
+                if last_x < 294 - 42 and last_y_flow < y1 - 10 and last_y_flow > target_y + 10 and abs(last_y_flow - last_y_weight) > 14:
+                    lcd.blit(background_flow, (last_x + 2, last_y_flow - 7), ((0,0), (45, 15)))
+                    # lcd.fill(col_black, ((last_x + 2, last_y_flow - 7), (45, 15)))
+                    changed_areas.append(((last_x + 2, last_y_flow - 7), (45, 15)))
+                if last_x < 294 - 42 and last_y_weight < y1 - 10 and last_y_weight > target_y + 10:
+                    lcd.blit(background_weight, (last_x + 2, last_y_weight - 7), ((0,0), (45, 15)))
+                    # lcd.fill(col_black, ((last_x + 2, last_y_weight - 7), (45, 15)))
+                    changed_areas.append(((last_x + 2, last_y_weight - 7), (45, 15)))
+                # DISPLAY PREDICTED END TIME/WEIGHT POINTS ON GRAPH
+                if predicted_end_time > 0 and flow_smooth > 0:
+                    p_now = (time_now) + (target_weight - filtered_weight)/flow_smooth - 1.15
+                    x_pred = min(int(round(a * (p_now - min_t) + x0)), x1)
+                    if p_now <= max_t:
+                        w_end = target_weight - 1.15*flow_smooth
+                        width = 0 # If pred_end_time is on the graph; the dot is filled.
+                    else:
+                        w_end = filtered_weight + flow_smooth*(max_t - (time_now))
+                        width = 1 # If pred_end_time is not on the graph; the dot is hollow
+                    y_pred = int(round(b * (w_end - min_w) + y1))
+                    background_dotpred = pygame.Surface((5,5))
+                    background_dotpred.blit(lcd, (0,0), ((x_pred-2, y_pred-2), (5, 5)))  # Copy existing surface into new background surface
+                    pygame.draw.circle(lcd, col_white, (x_pred, y_pred), 2, width) # Draw a circle
+                    pred_curve_area = ((x_pred-2, y_pred-2), (5, 5)) 
+                    changed_areas.append(pred_curve_area)
+                # PLOT FLOW (and make sure it stays in the background)
+                background_flowcurve = pygame.Surface((new_x-last_x+1, y1 - min(last_y_flow, new_y_flow) + 1))
+                background_flowcurve.set_colorkey(col_black) # Any black pixel will be transparent
+                background_flowcurve.blit(lcd, (0,0), ((min(last_x, new_x), min(last_y_flow, new_y_flow)), (abs(new_x-last_x) + 1, abs(y1 - min(last_y_flow, new_y_flow)) + 1)))
+                pygame.draw.polygon(lcd, col_lightred, [(last_x, last_y_flow), (new_x, new_y_flow), (new_x, y1), (last_x, y1)], 0)
+                lcd.blit(background_flowcurve, (min(last_x, new_x), min(last_y_flow, new_y_flow)))
+                changed_areas.append(((min(last_x, new_x), min(last_y_flow, new_y_flow)), (abs(new_x-last_x) + 1, abs(y1 - min(last_y_flow, new_y_flow)) + 1)))
+                # pygame.draw.line(lcd, col_lightblue, (last_x, y1), (new_x, y1), 1)
+                # changed_areas.append(((last_x, y1), (new_x-last_x, 1)))
+                # PLOT CURVE
+                pygame.draw.line(lcd, col_white, (last_x, last_y_weight), (new_x, new_y_weight))
+                changed_areas.append(((min(last_x, new_x), min(last_y_weight, new_y_weight)), (abs(new_x-last_x) + 3, abs(new_y_weight-last_y_weight) + 3)))
+                # DISPLAY FLOW TEXT
+                if new_x < 294 - 42 and new_y_flow < y1 - 10 and new_y_flow > target_y + 10 and abs(new_y_flow - new_y_weight) > 14:
+                    background_flow = pygame.Surface((45,15))
+                    background_flow.blit(lcd, (0,0), ((new_x + 2, new_y_flow - 7), (45, 15)))
+                    display_text(str(round(flow_smooth, 1)) + " g/s", (new_x + 2, new_y_flow - 7), 20, col_lightred)
+                    changed_areas.append(((new_x + 2, new_y_flow - 7), (45, 15)))
+                # DISPLAY WEIGHT TEXT 
+                if new_x < 294 - 42 and new_y_weight < y1 - 10 and new_y_weight > target_y + 10:
+                    background_weight = pygame.Surface((45,15))
+                    background_weight.blit(lcd, (0,0), ((new_x + 2, new_y_weight - 7), (45, 15)))
+                    display_text(str(round(filtered_weight, 1)) + " g", (new_x + 2, new_y_weight - 7), 20, col_white)
+                    changed_areas.append(((new_x + 2, new_y_weight - 7), (45, 15)))
+                # SAVE SHOT GRAPH HISTORY 
+                if new_x < x1:
+                    all_values["w_pointlist"].append((new_x, new_y_weight))
+                last_x = new_x
+                last_y_weight = new_y_weight
+                last_y_flow = new_y_flow
+            # VERTICAL LINE AT THE END OF SHOT
+            if display_end_shot_line_now == True:
+                x_endshot = int(round(a*(end_shot_time - start_shot_time) + x0))
+                if x_endshot <= x1:
+                    lcd.blit(background_dotpred, (x_pred-2, y_pred-2), ((0,0),(5, 5)))
+                    changed_areas.append(((x_pred-2, y_pred-2), (5, 5)))
+                    pygame.draw.line(lcd, col_orange, (x_endshot, y0), (x_endshot, y1), 1)
+                    changed_areas.append(((x_endshot, y0), (1, y1 - y0)))
+                    pygame.draw.circle(lcd, col_white, (x_endshot, last_y_weight), 2)
+                    changed_areas.append(((x_endshot-2, last_y_weight-2), (5, 5)))
+                    all_values["x_endshot"] = x_endshot
+                    all_values["target_weight"] = target_weight
+                display_end_shot_line_now = False
+            # LIGHTS INDICATING SHOT SPEED
+            if predicted_end_time > 0 and flow_smooth > 0 and predicted_end_time != old_predicted_end_time:
+                breakpoints_now = [interpolate(time_now, (10,35), (25,27)),
+                                   interpolate(time_now, (10,40), (25,30)),
+                                   interpolate(time_now, (10,70), (25,33))]
+                scenario = 3 - cut(p_now, breakpoints_now)
+                color = [col_darkred, col_orange, col_yellow, col_white][scenario]
+                circle = [0, 1, 2, 2][scenario]
+                for i in range(0, 3):
+                    pygame.draw.circle(lcd, col_verydarkgrey, (x0 + 10 + i*10, 97), 4)
+                pygame.draw.circle(lcd, color, (x0 + 10 + (2-circle)*10, 97), 4)
+                changed_areas.append(((x0 + 6, 93), (28, 8)))
+                old_predicted_end_time = predicted_end_time
+            # pygame.display.update(changed_areas)
+            for rect in changed_areas:
+                pygame.display.update(rect)
+        time.sleep(0.02)
+    lcd.fill(col_black, rect = ((0,65), (295, 220-65)))
+    pygame.display.update(((0,65), (295, 220-65)))
+
+
+# Add to display_weight_graph:
+## - previous shot weight (in darkgrey)
+###         * grab data from last log_shotXXX.json file saved and redraw it???
+## - rescaling every 10 seconds: 
+###         * save weight/flow sequence
+###         * adding 10 seconds max_t if time.time()-start_shot_time > max_t
+###         * redrawing everything (flow/weight/x axis)
+## - show lines of predicted_end_time? (maybe the red/orange/yellow lines are sufficient)
+
+j = 0
+
+def draw_belowgraph():
+    global j
+    if keep_reading_scale == False:
+        string1 = "T: " + str(set_temp) + u"\u2103" + "  -  H: " 
+        display_text(string1, area_belowgraph[0], 25, col_text)
+        string2 = str(int(power)) + "%  -"
+        width = pygame.font.Font(None, 25).render(string2, True, col_white).get_width()
+        display_text(string2, (100+59-width, area_belowgraph[0][1]), 25, col_text)
+        if steaming_on == True:
+            string3 = "  -  Steam"
+        if steaming_on == False:
+            # Update the rest of the display only every 2 refreshes
+            if (j % 12 < 2): # 0-1
+                if time.time() - last_input_time < 2700: # If time.time() - last_input_time >= 2700, the system should either shutdown OR should be detecting that NTPD has reset time (in which case "On time" will be off for less than 5 seconds -- until thread_auto_dim_or_shutdown() reajusts start_script_time and last_input_time)
+                    minutes = int((time.time() - start_script_time)/60)
+                    string3 = "On: %s min." %(minutes)
+                else:
+                    string3 = "Target: %s g." %(target_weight)
+            elif (j % 12 < 4): # 2-3
+                string3 = "Target: %s g." %(target_weight)
+            else:
+                if flow_mode == "Auto":
+                    if (j % 12 < 6): # 4-5
+                        string3 = "Flow: Auto"
+                    elif (j % 12 < 8): # 6-7
+                        pump0 = int(pp0*10)
+                        pump1   = int(pp1*10)
+                        if profile_0a == "Flat":
+                            string3 = "0-%ss: %s%%" %(time_a, pump0)
+                        else:
+                            string3 = "0-%ss: %s-%s%%" %(time_a, pump0, pump1)
+                    elif (j % 12 < 10): # 8-9
+                        pump1   = int(pp1*10)
+                        pump2 = int(pp2*10)
+                        if profile_ab == "Flat":
+                            string3 = "%s-%ss: %s%%" %(time_a, time_b, pump1)
+                        else:
+                            string3 = "%s-%ss: %s-%s%%" %(time_a, time_b, pump1, pump2)
+                    elif (j % 12 < 12): # 10-11
+                        pump2 = int(pp2*10)
+                        string3 = "After %ss: %s%%" %(time_b, pump2)
+                elif flow_mode == "Manual": # 4 or 8
+                    string3 = "Flow: Manual"
+                    j += 3
+            j += 1
+        display_text(string3, (165, area_belowgraph[0][1]), 25, col_text)
+    else:
+        string = "P: " + str(int(pump_power)*10) + "%"
+        display_text(string, (0, area_belowgraph[0][1]), 25, col_text)
+        if predicted_end_time > 0:
+            string2 = "  -  End: " + str(int(round(predicted_end_time, 0))) + " s."
+            display_text(string2, (65, area_belowgraph[0][1]), 25, col_lightblue)
+
 
 area_menu = ((150, 65), (130, 155))
 
@@ -1143,13 +1434,24 @@ def voltages_to_weight():
 
 def filter_initialize():
     global Q0, R0, x, P
-    Q0 =np.array([[0.04, 0.00], 
+    Q0 =np.array([[0.04, 0.00],
                   [0.00, 0.08]])
     R0 = np.array([[2.0, -1.0],
                   [-1.0, 2.0]])
     x = np.array([0.0, 0.0])
     P = np.array([[0.0, 0.0],
                   [0.0, 0.0]])
+
+# def filter_initialize():
+#     global Q0, R0, x, P
+#     Q0 =np.array([[10.0, 0.00],
+#                   [0.00, 10.0]])
+#     R0 = np.array([[2.0, -1.0],
+#                   [-1.0, 2.0]])
+#     x = np.array([0.0, 0.0])
+#     P = np.array([[0.0, 0.0],
+#                   [0.0, 0.0]])
+#
 
 flow_list6 = deque([0], 6)
 flow_smooth = 0
@@ -1187,7 +1489,6 @@ def filter(current_weight, prev_weight, time1, time0, Q0, R):
     flow_list6.append(filtered_flow)
     flow_smooth = mean(flow_list6)
 
-
 def save_temperature_logs():
     filename = "/home/pi/logs/log_temp" + time.strftime('%Y-%b-%d-%H%M') + ".json"  
     # Hidden feature: Cancel shutdown will save temperature logs.
@@ -1201,6 +1502,8 @@ def save_settings():
                "target_weight": target_weight, 
                "time_a": time_a,
                "time_b": time_b, 
+               "profile_0a": profile_0a,
+               "profile_ab": profile_ab,
                "pp0": pp0,
                "pp1": pp1,
                "pp2": pp2,
@@ -1209,12 +1512,16 @@ def save_settings():
                "kD": kD,
                "k0": k0}, open("/home/pi/settings.txt", "w"))
 
+def save_lastshot():
+    json.dump({"all_values" : all_values}, open("/home/pi/lastshot.json", "w"))
+
 def shutdown():
     # Save data in json file (y, heat_series,)
     # Save settings (temperature, preinfusion, etc.) in another json file to be loaded later on.
     # save_temperature_logs()
     GPIO.cleanup()
     save_settings()
+    save_lastshot()
     pygame.quit()
     display_brightness(10)
     # os._exit(1)
@@ -1289,11 +1596,16 @@ def display_menu_items(items, n_item_selected, number_of_choices):
     pygame.display.update(area_menu)
     old_number_of_choices = number_of_choices
 
+
+# Very ugly, not proud of this  #
+
+items = ["Flush", "Shut Down", "Target Weight", "Pump Power P0", "Pump Power P1", "Pump Power P2", "Time T1", "Time T2", "Profile 0-T1", "Profile T1-T2", "Backflush", "Flow Mode", "kP", "kI", "kD", "k0", "Reset Defaults", "Cancel Changes"]
+n = len(items)
+
 def display_main_menu():
-    global items, n
-    items = ["Flush", "Shut Down", "Target Weight", "Pump Power P0", "Pump Power P1", "Pump Power P2", "Ramp-Up Time", "Preinfusion", "Backflush", "Flow Mode", "kP", "kI", "kD", "k0", "Reset Defaults", "Cancel Changes"]
-    n = len(items)
     display_menu_items(items, n_item_selected, n)
+
+# Ouch #
     
 def display_change_param(name, value, units):
     # This is function is used to display: max weight, preinfusion time, max pump, etc. as they are being changed.
@@ -1367,51 +1679,58 @@ def select_menu_item():
         display_change_param("Target Weight:", int(target_weight), "g.")
     elif n_item_selected % n == 3:
         submenu = 3
-        display_change_param("Pump Power P0:", int(pp0*10), "%")
+        display_change_param("Pump P0:", int(pp0*10), "%")
     elif n_item_selected % n == 4:
         submenu = 4
-        display_change_param("Pump Power P1:", int(pp1*10), "%")
+        display_change_param("Pump P1:", int(pp1*10), "%")
     elif n_item_selected % n == 5:
         submenu = 5
-        display_change_param("Pump Power P2:", int(pp2*10), "%")
+        display_change_param("Pump P2:", int(pp2*10), "%")
     elif n_item_selected % n == 6:
         submenu = 6
-        display_change_param("Ramp-Up:", int(time_a), "s.")
+        display_change_param("Time T1:", int(time_a), "s.")
     elif n_item_selected % n == 7:
         submenu = 7
-        display_change_param("Preinfusion:", int(time_b), "s.")
-    elif n_item_selected % n == 8: 
+        display_change_param("Time T2:", int(time_b), "s.")
+    elif n_item_selected % n == 8:
+        submenu = 8
+        display_change_param("Profile 0-T1:", profile_0a, "")
+    elif n_item_selected % n == 9:
+        submenu = 9
+        display_change_param("Profile T1-T2:", profile_ab, "")
+    elif n_item_selected % n == 10: 
         # Backflush
         if backflush_on == False:
             thread.start_new_thread(backflush, ())
         elif backflush_on == True:
             backflush_on = False
-    elif n_item_selected % n == 9:
-        # Manual mode
-        submenu = 9
-        display_change_param("Flow Mode:", flow_mode, "")
-    elif n_item_selected % n == 10:
-        # kP
-        submenu = 10
-        display_change_param("PID: kP:", kP, "")
     elif n_item_selected % n == 11:
-        # kI
+        # Manual mode
         submenu = 11
-        display_change_param("PID: kI:", kI, "")
+        display_change_param("Flow Mode:", flow_mode, "")
     elif n_item_selected % n == 12:
-        # kD
+        # kP
         submenu = 12
-        display_change_param("PID: kD:", kD, "")
+        display_change_param("PID: kP:", kP, "")
     elif n_item_selected % n == 13:
-        # k0
+        # kI
         submenu = 13
-        display_change_param("PID: k0:", k0, "")
+        display_change_param("PID: kI:", kI, "")
     elif n_item_selected % n == 14:
+        # kD
+        submenu = 14
+        display_change_param("PID: kD:", kD, "")
+    elif n_item_selected % n == 15:
+        # k0
+        submenu = 15
+        display_change_param("PID: k0:", k0, "")
+    elif n_item_selected % n == 16:
         # Reset
         reset_settings()
-    elif n_item_selected % n == 15:
+    elif n_item_selected % n == 17:
         # Reset
         load_settings()
+    refresh_buttons()
 
 n_item_selected = 0
 
@@ -1425,19 +1744,20 @@ def button1(channel):
     long_press = False
     global menu, n_item_selected, submenu, last_input_time
     last_input_time = time.time()
-    display_brightness(100)
+    display_brightness(max_brightness)
     if menu == 0:
         while GPIO.input(button1_pin) == GPIO.LOW: # Button is still pressed.
             time.sleep(.05)
-            if time.time() - time_button_press > .75:
+            if time.time() - time_button_press > .5:
                 print "Long button 1 press: accessing settings menu"
                 long_press = True
                 menu = 1
                 reset_graph_area(menu, shot_pouring)
-                refresh_temp_display(y, graph_top, graph_bottom, area_graph, area_text_temp)
+                refresh_graph(y, graph_top, graph_bottom, area_graph, area_text_temp)
                 time_menu = time.time()
                 n_item_selected = 0
                 display_main_menu()
+                refresh_buttons()
                 while GPIO.input(button1_pin) == GPIO.LOW:
                     if time.time() - time_menu > 1 and n_item_selected == 0 : # Stay longer (1 second) on the first selected item.
                         n_item_selected = (n_item_selected + 1) % n
@@ -1460,10 +1780,13 @@ def button1(channel):
         menu = 1
         submenu = 0
     reset_graph_area(menu, shot_pouring)
-    refresh_temp_display(y, graph_top, graph_bottom, area_graph, area_text_temp)
+    refresh_graph(y, graph_top, graph_bottom, area_graph, area_text_temp)
+    refresh_buttons()
     if menu == 1:
         # n_item_selected = 0
         display_main_menu()
+        if n_item_selected % n in range(3, 10):
+            display_profile_graph()
     if menu == 0:
         n_item_selected = 0
 
@@ -1474,18 +1797,20 @@ def button2(channel):
         print "Probably a false positive button2 press"
         return
     print "Button 2 pressed"
-    global set_temp, shot_temp, n_item_selected, m_item_selected, target_weight, pp0, pp1, pp2, time_a, time_b, last_input_time, flow_mode, kP, kI, kD, k0
+    global set_temp, shot_temp, n_item_selected, m_item_selected, target_weight, pp0, pp1, pp2, time_a, time_b, last_input_time, flow_mode, kP, kI, kD, k0, profile_0a, profile_ab
     last_input_time = time.time()
-    display_brightness(100)
+    display_brightness(max_brightness)
 
     if menu == 0:
         set_temp += 1
         shot_temp = set_temp
-        refresh_temp_display(y, graph_top, graph_bottom, area_graph, area_text_temp)
+        refresh_graph(y, graph_top, graph_bottom, area_graph, area_text_temp)
     if menu == 1:
         if submenu == 0:
             n_item_selected -= 1
             display_main_menu()
+            if n_item_selected % n in range(3, 10):
+                display_profile_graph()
         elif submenu == 1:
             m_item_selected -= 1
             display_confirm_shutdown_menu()
@@ -1497,45 +1822,64 @@ def button2(channel):
             # if pp0 < 10 and pp0 < pp1:
             if pp0 < 10:
                 pp0 += 1
-            display_change_param("Pump Power P0:", int(pp0*10), "%")
+            display_profile_graph()
+            display_change_param("Pump P0:", int(pp0*10), "%")
         elif submenu == 4:
             # if pp1 < 10 and pp1 < pp2:
             if pp1 < 10:
                 pp1 += 1
-            display_change_param("Pump Power P1:", int(pp1*10), "%")
+            display_profile_graph()
+            display_change_param("Pump P1:", int(pp1*10), "%")
         elif submenu == 5:
             if pp2 < 10:
                 pp2 += 1
-            display_change_param("Pump Power P2:", int(pp2*10), "%")
+            display_profile_graph()
+            display_change_param("Pump P2:", int(pp2*10), "%")
         elif submenu == 6:
             if time_a < 10:
                 time_a += 1
                 if time_a > time_b:
                     time_b = time_a
-            display_change_param("Ramp-Up:", int(time_a), "s.")
+            display_profile_graph()
+            display_change_param("Time T1:", int(time_a), "s.")
         elif submenu == 7:
             if time_b < 10:
                 time_b += 1
-            display_change_param("Preinfusion:", int(time_b), "s.")
+            display_profile_graph()
+            display_change_param("Time T2:", int(time_b), "s.")
+        elif submenu == 8:
+            if profile_0a == "Flat":
+                profile_0a = "Gradual"
+            else:
+                profile_0a = "Flat"
+            display_profile_graph()
+            display_change_param("Profile 0-T1:", profile_0a, "")
         elif submenu == 9:
+            if profile_ab == "Flat":
+                profile_ab = "Gradual"
+            else:
+                profile_ab = "Flat"
+            display_profile_graph()
+            display_change_param("Profile T1-T2:", profile_ab, "")
+        elif submenu == 11:
             if flow_mode == "Manual":
                 flow_mode = "Auto"
             else:
                 flow_mode = "Manual"
             display_change_param("Flow Mode:", flow_mode, "")
-        elif submenu == 10:
+        elif submenu == 12:
             if kP < 0.20:
                 kP += .005
             display_change_param("PID: kP:", kP, "")
-        elif submenu == 11:
+        elif submenu == 13:
             if kI < 0.30:
                 kI += .01
             display_change_param("PID: kI:", kI, "")
-        elif submenu == 12:
+        elif submenu == 14:
             if kD < 4:
                 kD += .10
             display_change_param("PID: kD:", kD, "")
-        elif submenu == 13:
+        elif submenu == 15:
             if k0 < .06:
                 k0 += .005
             display_change_param("PID: k0:", k0, "")
@@ -1547,18 +1891,20 @@ def button3(channel):
         print "Probably a false positive button3 press"
         return
     print "Button 3 pressed"
-    global set_temp, shot_temp, n_item_selected, m_item_selected, target_weight, pp0, pp1, pp2, time_a, time_b, last_input_time, flow_mode, kP, kI, kD, k0
+    global set_temp, shot_temp, n_item_selected, m_item_selected, target_weight, pp0, pp1, pp2, time_a, time_b, last_input_time, flow_mode, kP, kI, kD, k0, profile_0a, profile_ab
     last_input_time = time.time()
-    display_brightness(100)
+    display_brightness(max_brightness)
 
     if menu == 0:
         set_temp -= 1
         shot_temp = set_temp
-        refresh_temp_display(y, graph_top, graph_bottom, area_graph, area_text_temp)
+        refresh_graph(y, graph_top, graph_bottom, area_graph, area_text_temp)
     if menu == 1:
         if submenu == 0:
             n_item_selected += 1
             display_main_menu()
+            if n_item_selected % n in range(3, 10):
+                display_profile_graph()
         elif submenu == 1:
             m_item_selected += 1
             display_confirm_shutdown_menu()
@@ -1569,46 +1915,65 @@ def button3(channel):
         elif submenu == 3:
             if pp0 > 1:
                 pp0 -= 1
-            display_change_param("Pump Power P0:", int(pp0*10), "%")
+            display_profile_graph()
+            display_change_param("Pump P0:", int(pp0*10), "%")
         elif submenu == 4:
             # if pp1 > 1 and pp1 > pp0:
             if pp1 > 1:
                 pp1 -= 1
-            display_change_param("Pump Power P1:", int(pp1*10), "%")
+            display_profile_graph()
+            display_change_param("Pump P1:", int(pp1*10), "%")
         elif submenu == 5:
             # if pp2 > 3 and pp2 > pp1:
             if pp2 > 3:
                 pp2 -= 1
-            display_change_param("Pump Power P2:", int(pp2*10), "%")
+            display_profile_graph()
+            display_change_param("Pump P2:", int(pp2*10), "%")
         elif submenu == 6:
             if time_a > 0:
                 time_a -= 1
-            display_change_param("Ramp-Up:", int(time_a), "s.")
+            display_profile_graph()
+            display_change_param("Time T1:", int(time_a), "s.")
         elif submenu == 7:
             if time_b > 0:
                 time_b -= 1
                 if time_b < time_a:
                     time_a = time_b
-            display_change_param("Preinfusion:", int(time_b), "s.")
+                display_profile_graph()
+            display_change_param("Time T2:", int(time_b), "s.")
+        elif submenu == 8:
+            if profile_0a == "Flat":
+                profile_0a = "Gradual"
+            else:
+                profile_0a = "Flat"
+            display_profile_graph()
+            display_change_param("Profile 0-T1:", profile_0a, "")
         elif submenu == 9:
+            if profile_ab == "Flat":
+                profile_ab = "Gradual"
+            else:
+                profile_ab = "Flat"
+            display_profile_graph()
+            display_change_param("Profile T1-T2:", profile_ab, "")
+        elif submenu == 11:
             if flow_mode == "Manual":
                 flow_mode = "Auto"
             else:
                 flow_mode = "Manual"
             display_change_param("Flow Mode:", flow_mode, "")
-        elif submenu == 10:
+        elif submenu == 12:
             if kP > 0.00:
                 kP -= .005
             display_change_param("PID: kP:", kP, "")
-        elif submenu == 11:
+        elif submenu == 13:
             if kI > 0:
                 kI -= .01
             display_change_param("PID: kI:", kI, "")
-        elif submenu == 12:
+        elif submenu == 14:
             if kD > 0:
                 kD -= .10
             display_change_param("PID: kD:", kD, "")
-        elif submenu == 13:
+        elif submenu == 15:
             if k0 > 0:
                 k0 -= .005
             display_change_param("PID: k0:", k0, "")
@@ -1622,8 +1987,7 @@ def button4(channel):
     print "Button 4 pressed"
     global shot_pouring, pump_power, end_shot_time, keep_reading_scale, steaming_on, set_temp, button4_repress, m_item_selected, n_item_selected, menu, submenu, backflush_on, flush_on, last_input_time
     last_input_time = time.time()
-    display_brightness(100)
-    
+    display_brightness(max_brightness)
     if menu == 0: # Main menu
         if shot_pouring == True:
             end_shot()
@@ -1632,8 +1996,8 @@ def button4(channel):
             # here: preheat for 1-2 seconds if needed
             shot_pouring = True
             pump_power = 0
-            reset_graph_area(menu, shot_pouring)
-            refresh_temp_display(y, graph_top, graph_bottom, area_graph, area_text_temp)
+            # reset_graph_area(menu, shot_pouring)
+            # refresh_graph(y, graph_top, graph_bottom, area_graph, area_text_temp)
             keep_reading_scale = True
             thread.start_new_thread(read_adc, ())
             thread.start_new_thread(voltages_to_weight, ())
@@ -1641,11 +2005,38 @@ def button4(channel):
             thread.start_new_thread(time_shot, ())
             thread.start_new_thread(pour_shot, ())
             thread.start_new_thread(display_pump_power, ())
+            thread.start_new_thread(display_weight_graph, ())
+            refresh_buttons()
             # Note: it's easy to start a thread from an outside function: button1 can start 2 threads: time_shot() and pour_shot()
             # but I don't know how to exit a thread remotely, from an outside function. thread.exit only works from the inside of the thread.
             # Make sure that each function called by thread.start_new_thread() has an if condition that ends with "return" when its job is done.
     elif menu == 1: # Settings menu
-        select_menu_item()
+        if submenu not in range(3, 9):
+            select_menu_item()
+            refresh_buttons()
+        else:
+            # Use button 4 to skip to next menu item, when if in pump profile/time/power submenus
+            n_item_selected += 1
+            if n_item_selected % n == 4:
+                submenu = 4
+                display_change_param("Pump P1:", int(pp1*10), "%")
+            if n_item_selected % n == 5:
+                submenu = 5
+                display_change_param("Pump P2:", int(pp2*10), "%")
+            if n_item_selected % n == 6:
+                submenu = 6
+                display_change_param("Time T1:", int(time_a), "s.")
+            if n_item_selected % n == 7:
+                submenu = 7
+                display_change_param("Time T2:", int(time_b), "s.")
+            if n_item_selected % n == 8:
+                submenu = 8
+                display_change_param("Profile 0-T1:", profile_0a, "")
+            if n_item_selected % n == 9:
+                submenu = 9
+                display_change_param("Profile T1-T2:", profile_ab, "")
+            display_profile_graph()
+            refresh_buttons()
 
 
 ##################################
@@ -1653,12 +2044,12 @@ def button4(channel):
 ##################################
 
 def thread_read_temp():
-    global trigger_heat, trigger_refresh_temp_display
+    global trigger_heat, trigger_refresh_graph
     while True:
         read_temp()
         adjust_heating_power()
         trigger_heat = True
-        trigger_refresh_temp_display = True
+        trigger_refresh_graph = True
 
 def thread_heat():
     global trigger_heat
@@ -1670,26 +2061,18 @@ def thread_heat():
             time.sleep(.01)
 
 
-def thread_refresh_temp_display():
-    global trigger_refresh_temp_display
+def thread_refresh_graph():
+    global trigger_refresh_graph
     while True:
-        if trigger_refresh_temp_display:
-            refresh_temp_display(y, graph_top, graph_bottom, area_graph, area_text_temp)
-            trigger_refresh_temp_display = False
+        if trigger_refresh_graph:
+            refresh_graph(y, graph_top, graph_bottom, area_graph, area_text_temp)
+            trigger_refresh_graph = False
         time.sleep(.02)
 
-def thread_refresh_buttons():
-    while True:
-        refresh_buttons(menu, shot_pouring, steaming_on, backflush_on, flush_on)
-        time.sleep(.02)
-
-def thread_refresh_timer_display():
-    global trigger_refresh_timer
-    while True:
-        if trigger_refresh_timer:
-            refresh_timer_display(seconds_elapsed, area_timer)
-            trigger_refresh_timer = False
-        time.sleep(.02)
+# def thread_refresh_buttons():
+#     while True:
+#         refresh_buttons(menu, shot_pouring, steaming_on, backflush_on, flush_on)
+#         time.sleep(.02)
 
 def thread_auto_dim_or_shutdown():
     while True:
@@ -1704,7 +2087,7 @@ def thread_auto_dim_or_shutdown():
             old_start_script_time = start_script_time
             start_script_time = time.time() - (old_time - old_start_script_time + 5)
             last_input_time = last_input_time + start_script_time - old_start_script_time
-        if time.time() - last_input_time >= 300 and brightness == 100:
+        if time.time() - last_input_time >= 300 and brightness == max_brightness:
             display_brightness(10)
         if time.time() - last_input_time >= 2700:
             shutdown()
@@ -1723,9 +2106,11 @@ print "Start script time: " + time.strftime('%Y-%m-%d-%H:%M:%S')
 thread.start_new_thread(thread_auto_dim_or_shutdown, ())
 thread.start_new_thread(thread_read_temp, ())
 thread.start_new_thread(thread_heat, ())
-thread.start_new_thread(thread_refresh_timer_display, ())
-thread.start_new_thread(thread_refresh_temp_display, ())
-thread.start_new_thread(thread_refresh_buttons, ())
+# thread.start_new_thread(thread_refresh_timer_display, ())
+thread.start_new_thread(thread_refresh_graph, ())
+
+refresh_buttons()
+# thread.start_new_thread(thread_refresh_buttons, ())
 
 GPIO.add_event_detect(button1_pin, GPIO.FALLING, callback=button1, bouncetime = 100)
 GPIO.add_event_detect(button2_pin, GPIO.FALLING, callback=button2, bouncetime = 100)
@@ -1734,7 +2119,7 @@ GPIO.add_event_detect(button4_pin, GPIO.FALLING, callback=button4, bouncetime = 
 
 os.system("gpio -g mode 18 pwm")
 os.system("gpio pwmc 1000")
-display_brightness(100)
+display_brightness(max_brightness)
 
 try:
     while True:
