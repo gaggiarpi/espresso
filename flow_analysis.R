@@ -11,7 +11,7 @@ df <- data.frame(weight = d$weight_filtered, time = d$time, t0 = d$t0, t1 = d$t1
 df$time <- df$time - d$start
 df <- df[df$time >= 0,]
 
-dw <- data.frame(weight = d$filtered_weight_series, time = d$filtered_time, flow = d$filtered_flow)
+dw <- data.frame(weight = d$filtered_weight_series, time = d$filtered_time, flow = d$filtered_flow, raw = d$raw_weights - d$tare_weight)
 dw$time <- dw$time - d$start
 dw <- dw[dw$time >= 0,]
 
@@ -33,7 +33,7 @@ xmax <- max(d$time)-d$start + .2
 # rows <- df$time >= 14 & df$time < d$end - d$start - .1
 rows <- df$flow_per_second > 0 & df$time < d$end - d$start - .1
 
-pred_min <- min(min(df$predicted_end_time[rows] - 1), 28)
+pred_min <- min(min(df$predicted_end_time[rows] - 1), d$target_time - 3)
 pred_max <- min(max(df$predicted_end_time[rows] + 1), 55)
 
 flow_max <- max(max(d$filtered_flow) + 0.1, 3.5)
@@ -53,7 +53,7 @@ pdf(height = 8, width = 5, file = graph_filename)
 
 g1 <- ggplot() +
 		geom_hline(yintercept = d$target_weight) + geom_vline(xintercept = d$end - d$start) +
-		# geom_point(data = data.frame(time = d$full_weight_series_time - d$start, weight = d$full_weight_series), aes(x=time, y=weight), col = "black", size = .5) +
+		geom_point(data = dw, aes(x=time, y=raw), col = "black", size = .3, alpha = I(.5)) +
 		geom_line( data = dw, aes(x=time, y=weight)) + 
 		labs(title = paste(round(df$weight[nrow(df)],1), "g. in", round(d$end - d$start,1), "s."), y="Weight in grams", x= element_blank()) +
 		coord_cartesian(xlim = c(-.8,xmax), ylim = c(min(dw$weight)-.5, max(dw$weight) + 1)) +
@@ -98,6 +98,9 @@ if (sum(rows) != 0){
 ###########################
 # Pump power vs. Time     #
 ###########################
+
+# Mean pump level:
+# round(sum(d$pump_power[d$time<=d$end] * diff(c(d$time,0))[d$time<=d$end])/(d$end-d$start),1)*10
 
 g4 <- ggplot(df, aes(x = time, y=pump_power)) + 
 		geom_step(color = "royalblue") +
